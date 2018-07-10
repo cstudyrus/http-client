@@ -9,7 +9,7 @@
 #define _URL_H_
 
 #include<url_query.h>
-#include<url_canonicalize.h>
+//#include<url_canonicalize.h>
 
 #include<stddef.h>
 #include<unistd.h>
