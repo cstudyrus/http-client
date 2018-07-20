@@ -1,387 +1,264 @@
-#include"url.h"
+#include"http-client.h"
 
-#include<stdio.h>
-#include<sys/types.h>
-#include<sys/socket.h>
-#include<netdb.h>
-#include<arpa/inet.h>
-#include<strings.h>
 #include<stdlib.h>
-#include<sys/uio.h>
+#include<string.h>
+#include<pthread.h>
 #include<unistd.h>
 #include<fcntl.h>
-#include<sys/select.h>
+#include<sys/time.h>
+#include<sys/types.h>
 #include<errno.h>
-#include<ctype.h>
 
-#include<openssl/bio.h>
-#include<openssl/ssl.h>
+static SSL_CTX* url2cat_ctx;
 
-#include<string.h>
-#include<assert.h>
-
-enum LOAD_MODE{FREE,LENGTH,CHUNK};
-
-struct __HTTP_request{
-	unsigned char *buf;
-	unsigned char *cur;
-	size_t buf_sz;
-	size_t cur_sz;
-};
-typedef struct __HTTP_request HTTP_request;
-
-/*struct http_string{
-	char *start;
-	size_t sz;
-};*/
-typedef char http_string_t[4096];
-
-struct http_buffer{
-	unsigned char *buf;
-	size_t buf_sz;
-
-	struct http_buffer *next;
+struct CRYPTO_dynlock_value{
+	pthread_mutex_t mtx;
 };
 
-struct __HTTP_response{
-	struct http_buffer *buffer;
-	struct http_buffer *cur_buffer;
-	size_t cur_buffer_sz;
-
-//	char code[4];
-	struct http_buffer *header_end_buffer;
-	unsigned char *header_end;
-	struct http_buffer *status_line_buffer;
-	unsigned char *status_line_end;
-	http_string_t headers[128];
-	int headers_num;
-
-	enum LOAD_MODE mode;
-	ssize_t read;
-
-	ssize_t chunk_size;
-	size_t old_chunk_sum;
-	struct http_buffer *chunk_buffer;
-	unsigned char *chunk_start;
-	int do_chunk_skip;
-	int first_chunk;
-
-	size_t ch_num;
-};
-typedef struct __HTTP_response HTTP_response;
-
-ssize_t get_ipv4_address(struct in_addr*, size_t, const char*);
-
-int http_request_alloc(HTTP_request*, size_t);
-void http_request_free(HTTP_request*);
-int http_request_set_method(HTTP_request*, const char*, const char*, const char*);
-int http_request_add_header(HTTP_request*, const char*, const char*);
-int http_request_close_header(HTTP_request*);
-
-int http_response_alloc(HTTP_response*, size_t);
-void http_response_free(HTTP_response*);
-int http_response_find_header_end(HTTP_response*);
-int http_response_add_mem_block(HTTP_response*);
-int http_response_parse_header(HTTP_response*);
-size_t http_response_get_header_size(const HTTP_response*);
-int http_response_get_chunk_size(HTTP_response*);
-int http_response_set_rest(HTTP_response*);
-void http_response_chunk_shift(HTTP_response*);
-
-int base64_encode(unsigned char*, size_t, const unsigned char*, size_t);
-ssize_t base64_decode(unsigned char*, size_t, const unsigned char*);
-
-int main(int argc, char **argv)
+static struct CRYPTO_dynlock_value* ssl_lock_create(const char *str, int n)
 {
-	char host_name[1024] = "www.skydns.ru";
-	char path[1024] = {'/','\0'};
-	struct in_addr addresses[16];
-	char ipv4_addr[16] = {'\0'};
-	ssize_t num, i;
-	HTTP_request request;
-	HTTP_response response;
-	int sock;
-	struct sockaddr_in server_addr;
-	struct iovec out_blocks[16];
-	struct iovec in_blocks[16];
+	struct CRYPTO_dynlock_value* result;
 
-	int fcntl_flags;
-	int connect_res;
-	fd_set rset, wset;
-	ssize_t readv_res;
-	struct http_buffer *current_buffer;
-	int auth_need = 0;
-	char auth_string[1024] = "\0";
-	char cred_string[1024] = "\0";
-	char username[] = "skydns";
-	char password[] = "dns1356";
+	result = (struct CRYPTO_dynlock_value*)malloc(sizeof(struct CRYPTO_dynlock_value));
 
-	char request_str[200000] = {'\0'};
-	char *request_str_p;
+	if(result != NULL)
+		pthread_mutex_init(&result->mtx, NULL);
 
-	BIO *connection;
-	SSL *ssl;
-	SSL_CTX *ctx;
+	return result;
+}
 
+static void ssl_lock_destroy(struct CRYPTO_dynlock_value *dnl, const char *str, int n)
+{
+	pthread_mutex_destroy(&dnl->mtx);
+	free(dnl);
+}
+
+static void ssl_lock(int mode, struct CRYPTO_dynlock_value *dnl, const char *str, int n)
+{
+	if(mode & CRYPTO_LOCK)
+		pthread_mutex_lock(&dnl->mtx);
+	else
+		pthread_mutex_unlock(&dnl->mtx);
+}
+
+static pthread_once_t ssl_lib_init = PTHREAD_ONCE_INIT;
+
+static void ssl_lib_init_routine(void)
+{
 	SSL_library_init();
-	ctx = SSL_CTX_new(TLS_client_method());
-int end_flag = 0;
-	if(argc < 2)
+	url2cat_ctx = SSL_CTX_new(TLS_client_method());
+	SSL_CTX_set_default_verify_paths(url2cat_ctx);
+
+	CRYPTO_set_dynlock_create_callback(ssl_lock_create);
+	CRYPTO_set_dynlock_lock_callback(ssl_lock);
+	CRYPTO_set_dynlock_destroy_callback(ssl_lock_destroy);
+}
+
+///////////////////////////////////////////////////////////
+struct buffer_chunk_deskriptor
+{
+	const unsigned char *start;
+	const unsigned char *end;
+};
+///////////////////////////////////////////////////////////
+
+
+HTTP_connection http_create_connection(const struct sockaddr *addr, int flags)
+{
+	HTTP_connection result;
+	char ip_address[256] = {'\0'};
+	char address[300] = {'\0'};
+	uint32_t fcntl_flags;
+
+	pthread_once(&ssl_lib_init, ssl_lib_init_routine);
+
+	result = (HTTP_connection)malloc(sizeof(struct __HTTP_connection));
+	if(result == NULL)
+		return HTTP_CONNECTION_INVALID;
+
+	result->use_ssl = 0;
+
+	switch(addr->sa_family){
+	case AF_INET:
+		result->domain = AF_INET;
+		inet_ntop(AF_INET, &(((const struct sockaddr_in*)addr)->sin_addr), ip_address, sizeof(ip_address));
+		snprintf(address, sizeof(address), "%s:%hu", ip_address, ntohs(((const struct sockaddr_in*)addr)->sin_port));
+		break;
+	case AF_INET6:
+		result->domain = AF_INET6;
+		inet_ntop(AF_INET6, &(((const struct sockaddr_in6*)addr)->sin6_addr), ip_address, sizeof(ip_address));
+		snprintf(address, sizeof(address), "[%s]:%hu", ip_address, ntohs(((const struct sockaddr_in*)addr)->sin_port));
+		break;
+	}
+	result->bio = BIO_new_connect(address);
+	if(result->bio == NULL)
 	{
-		printf("Usage: %s <url>\n", argv[0]);
-		return 1;
+		free(result);
+		return HTTP_CONNECTION_INVALID;
 	}
 
-//	url_get_host(host_name, 1024, argv[1]);
-
-
-
-	num = get_ipv4_address(addresses, 16, host_name);
-	inet_ntop(AF_INET, addresses, ipv4_addr, sizeof(ipv4_addr));
-
-
-	if(!num)
+	if(BIO_do_connect(result->bio) != 1)
 	{
-		printf("Unable to resolve hostname %s\n", host_name);
-		return 2;
+		free(result);
+		return HTTP_CONNECTION_INVALID;
 	}
 
-/*	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr = addresses[0];
-	server_addr.sin_port = htons(80);
-
-	if((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	if(flags & HTTP_SSL_USE)
 	{
-		printf("Unable to create socket\n");
-		return 2;
-	}*/
-
-	connection = BIO_new_connect(ipv4_addr);
-	if(!connection)
-	{
-		printf("Can not create BIO connection\n");
-		exit(1);
-	}
-	printf("BIO connection object was created\n");
-
-	BIO_set_conn_port(connection, "443");
-	printf("BIO connection object port was set\n");
-
-//	sock = BIO_get_fd(connection, NULL);
-
-/*	fcntl_flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, fcntl_flags | O_NONBLOCK);*/
-
-	BIO_do_connect(connection);
-
-	SSL_CTX_set_default_verify_paths(ctx);
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-	if((ssl = SSL_new(ctx)) == NULL)
-	{
-		printf("Can not create SSL connection object\n");
-		exit(1);
-	}
-	printf("SSL connection object was created\n");
-
-	SSL_set_bio(ssl, connection, connection);
-	if((SSL_connect(ssl)) < 1)
-	{
-		printf("Can not pass SSL handshake\n");
-		exit(1);
-	}
-	printf("SSL handshake was successfully passed\n");
-
-
-	sock = BIO_get_fd(connection, NULL);
-	fcntl_flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, fcntl_flags | O_NONBLOCK);
-
-/*	if((connect_res = connect(sock, (const struct sockaddr*)&server_addr, sizeof(struct sockaddr_in)))
-			&& errno != EINPROGRESS)
-	{
-		printf("Unable to connect to the server\n");
-		return 2;
-	}*/
-
-
-	/* //////////////// Подготовка запроса ///////////////////////////////// */
-	http_request_alloc(&request, 8191);
-
-//	url_get_path(path, 1024, argv[1]);
-
-	http_request_set_method(&request, "GET", "1.1", path);
-	http_request_add_header(&request, "Host", host_name);
-	http_request_add_header(&request, "User-Agent", "liburl2cat");
-	if((auth_need))
-	{
-		strcpy(cred_string, username);
-		strcat(cred_string, ":");
-		strcat(cred_string, password);
-		strcpy(auth_string, "Basic ");
-		base64_encode(auth_string + strlen("Basic "),1024,cred_string,strlen(cred_string));
-
-		http_request_add_header(&request, "Authorization", auth_string);
-	}
-	http_request_add_header(&request, "Accept", "*/*");
-	http_request_close_header(&request);
-	/* //////////////////////////////////////////////// */
-
-	/* ////////// Ожидание завершения соединения ///////////////// */
-	if(connect_res)
-	{
-		FD_ZERO(&rset);
-		FD_ZERO(&wset);
-
-		FD_SET(sock, &rset);
-		wset = rset;
-
-		pselect(sock + 1, &rset, &wset, NULL, NULL, NULL);
-		if(!FD_ISSET(sock, &rset) && !FD_ISSET(sock, &wset))
+		if((result->ssl = SSL_new(url2cat_ctx)) == NULL)
 		{
-			printf("Unable to connect to the server AGAIN\n");
-			return 2;
+			BIO_free(result->bio);
+			free(result);
+			return HTTP_CONNECTION_INVALID;
 		}
-	}
-	/* //////////////////////////////////// */
+		if(flags & HTTP_SSL_VERIFY_SERVER_CERT)
+			SSL_set_verify(result->ssl, SSL_VERIFY_PEER, NULL);
 
-	/* ///////////// Отправка запроса /////////////////// */
-/*	out_blocks[0].iov_base = request.buf;
-	out_blocks[0].iov_len = request.buf_sz - request.cur_sz;
-
-	writev(sock, out_blocks, 1);*/
-	SSL_write(ssl, request.buf, request.buf_sz - request.cur_sz);
-
-	http_request_free(&request);
-	/* //////////////////////////////////////////////// */
-
-
-	http_response_alloc(&response,8191);
-	FD_ZERO(&rset);
-	FD_SET(sock, &rset);
-	pselect(sock + 1, &rset, NULL, NULL, NULL, NULL);
-	if(FD_ISSET(sock, &rset))
-	{
-		while(1)
+		SSL_set_bio(result->ssl, result->bio, result->bio);
+		if((SSL_connect(result->ssl)) < 1)
 		{
-/*			in_blocks[0].iov_base = response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz);
-			in_blocks[0].iov_len = response.cur_buffer_sz;
-			*/
+			SSL_clear(result->ssl);
+			BIO_free(result->bio);
+			free(result);
+			return HTTP_CONNECTION_INVALID;
+		}
+		result->use_ssl = 1;
+	}
 
-			FD_ZERO(&rset);
-			FD_SET(sock, &rset);
+	result->socket_fd = BIO_get_fd(result->bio, NULL);
+	fcntl_flags = fcntl(result->socket_fd, F_GETFL, 0);
+	fcntl(result->socket_fd, F_SETFL, fcntl_flags | O_NONBLOCK);
 
-			if(!SSL_pending(ssl))
-				pselect(sock + 1, &rset, NULL, NULL, NULL, NULL);
-//			readv_res = readv(sock, in_blocks, 1);
-			readv_res = SSL_read(ssl, response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz), response.cur_buffer_sz);
+	return result;
+}
+
+void http_shutdown_connection(HTTP_connection connection)
+{
+	if(connection->use_ssl)
+		SSL_shutdown(connection->ssl);
+	BIO_free(connection->bio);
+	close(connection->socket_fd);
+	free(connection);
+}
+
+int http_send_request(HTTP_connection conn, const HTTP_request *request)
+{
+	struct iovec out_block;
+
+	if(conn->use_ssl)
+	{
+		if(SSL_write(conn->ssl, request->buf, request->buf_sz - request->cur_sz) != request->buf_sz - request->cur_sz)
+			return 1;
+		else
+			return 0;
+	}
+	else
+	{
+		out_block.iov_base = request->buf;
+		out_block.iov_len = request->buf_sz - request->cur_sz;
+
+		if(writev(conn->socket_fd, &out_block, 1) != out_block.iov_len)
+			return 1;
+		else
+			return 0;
+	}
+}
+
+int http_get_response(HTTP_connection conn, HTTP_response *response)
+{
+	fd_set rset;
+	int readv_res;
+	struct iovec in_block;
+	int res;
+
+/*	FD_ZERO(&rset);
+	FD_SET(conn->socket_fd, &rset);
+	pselect(conn->socket_fd + 1, &rset, NULL, NULL, NULL, NULL);
+	if(FD_ISSET(conn->socket_fd, &rset))
+	{*/
+	while(1)
+	{
+		if(conn->use_ssl && !SSL_pending(conn->ssl))
+		{
+			do{
+				FD_ZERO(&rset);
+				FD_SET(conn->socket_fd, &rset);
+				pselect(conn->socket_fd + 1, &rset, NULL, NULL, NULL, NULL);
+			}while(!FD_ISSET(conn->socket_fd, &rset));
+		}
+
+		if(conn->use_ssl)
+		{
+			readv_res = SSL_read(conn->ssl, response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz), response->cur_buffer_sz);
 			while(readv_res < 0)
 			{
 				int ssl_error;
-				ssl_error = SSL_get_error(ssl,readv_res);
+				ssl_error = SSL_get_error(conn->ssl,readv_res);
 				if(ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE)
-					readv_res = SSL_read(ssl, response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz), response.cur_buffer_sz);
+					readv_res = SSL_read(conn->ssl, response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz), response->cur_buffer_sz);
 				else
-				{
-					// ERROR!!!
-					int a = 0;
-				}
+					return 1;
 			}
-
-
-			response.cur_buffer_sz -= readv_res;
-			response.read += readv_res;
-
-			if(!response.headers_num)
-				if(http_response_find_header_end(&response) < 0)
-				{
-					printf("Error of response header end\n");
-					exit(-18);
-				}
-
-			if(response.mode == CHUNK && response.read >= response.ch_num)
-			{
-
-
-				if(response.do_chunk_skip)
-					http_response_chunk_shift(&response);
-
-				if(http_response_get_chunk_size(&response))
-				{
-					if(response.cur_buffer_sz == 0)
-						http_response_add_mem_block(&response);
-					continue;
-				}
-			}
-
-			// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
-			if(response.ch_num > response.read && response.cur_buffer_sz)
-				continue;
-			else if(response.ch_num > response.read)
-				http_response_add_mem_block(&response);
-			else if(response.mode == LENGTH && response.ch_num == response.read)
-			{
-				printf("AGA!\n");
-				break;
-			}
-			else if(response.mode == CHUNK && response.ch_num + 4 == response.read)
-				break;
-			else if(response.cur_buffer_sz)
-				continue;
-			else
-				http_response_add_mem_block(&response);
 		}
-
-		current_buffer = response.buffer;
-		request_str_p = request_str;
-		ssize_t rest_copy = response.read;
-		while(current_buffer != NULL)
+		else
 		{
-			if(current_buffer->next != NULL)
+			in_block.iov_base = response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz);
+			in_block.iov_len = response->cur_buffer_sz;
+
+			readv_res = readv(conn->socket_fd, &in_block, 1);
+			while(readv_res < 0)
 			{
-				memcpy(request_str_p, current_buffer->buf, current_buffer->buf_sz);
-				rest_copy -= current_buffer->buf_sz;
-				request_str_p += current_buffer->buf_sz;
+				if(errno == EAGAIN || errno == EWOULDBLOCK)
+					readv_res = readv(conn->socket_fd, &in_block, 1);
+				else
+					return 1;
 			}
-			else
-				memcpy(request_str_p, current_buffer->buf, rest_copy);
-//			request_str_p += current_buffer->buf_sz;
-			current_buffer = current_buffer->next;
 		}
-		request_str[response.read] = 0;
 
-		puts(request_str);
+
+		response->cur_buffer_sz -= readv_res;
+		response->read += readv_res;
+
+		if(!response->headers_num)
+		{
+			res = http_response_find_header_end(response);
+			if(res < 0)
+				return 1;
+			else if(res == 0)
+				http_response_get_code(response);
+			else
+				;
+		}
+
+		if(response->mode == CHUNK && response->read >= response->ch_num)
+		{
+			if(response->do_chunk_skip)
+				http_response_chunk_shift(response);
+
+			if(http_response_get_chunk_size(response))
+			{
+				if(response->cur_buffer_sz == 0)
+					http_response_add_mem_block(response);
+				continue;
+			}
+		}
+
+		// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
+		if(response->ch_num > response->read && response->cur_buffer_sz)
+			continue;
+		else if(response->ch_num > response->read)
+			http_response_add_mem_block(response);
+		else if(response->mode == LENGTH && response->ch_num == response->read)
+			break;
+		else if(response->mode == CHUNK && response->ch_num + 4 == response->read)
+			break;
+		else if(response->cur_buffer_sz)
+			continue;
+		else
+			http_response_add_mem_block(response);
 	}
 
-	http_response_free(&response);
-
-	BIO_free(connection);
 	return 0;
-}
-
-ssize_t get_ipv4_address(struct in_addr *buf, size_t n, const char *host_name)
-{
-	struct addrinfo addr_hint;
-	struct addrinfo *lookup_res;
-	ssize_t result = 0;
-	struct in_addr tmp;
-
-	addr_hint.ai_family = AF_INET;
-	addr_hint.ai_socktype = 0;
-	addr_hint.ai_protocol = 0;
-	addr_hint.ai_flags = AI_ADDRCONFIG;
-
-	getaddrinfo(host_name, NULL, &addr_hint, &lookup_res);
-
-	while(lookup_res != NULL && result < n)
-	{
-		tmp = ((struct sockaddr_in*)(lookup_res->ai_addr))->sin_addr;
-		if(result == 0 || bcmp(&buf[result-1],&tmp, sizeof(struct in_addr)))
-			buf[result++] = tmp;
-
-		lookup_res = lookup_res->ai_next;
-	}
-
-	return result;
 }
 
 int http_request_alloc(HTTP_request *request, size_t n)
@@ -587,8 +464,7 @@ int http_response_find_header_end(HTTP_response *response)
 		response->status_line_end = ++current;
 		++num;
 	}
-//	++current;
-//	++num;
+
 	while(current_buffer != NULL)
 	{
 
@@ -620,6 +496,31 @@ int http_response_find_header_end(HTTP_response *response)
 	}
 
 	return 1;
+}
+
+int http_response_get_code(HTTP_response *response)
+{
+	register unsigned char *current;
+	register size_t n = 0;
+
+	current = response->buffer->buf;
+
+	while(*current != ' ')
+		++current;
+	while(*current == ' ')
+		++current;
+	response->code = (unsigned short)strtoul(current, NULL, 10);
+
+	while(*current != ' ')
+		++current;
+	while(*current == ' ')
+		++current;
+
+	while(*current != '\r' || *(current+1) != '\n')
+		response->code_text[n++] = *current++;
+	response->code_text[n] = '\0';
+
+	return 0;
 }
 
 int http_response_parse_header(HTTP_response *response)
@@ -716,7 +617,7 @@ static int http_response_get_chunk_size_load(HTTP_response *response, size_t n)
 	return 0;
 }
 
-int http_response_get_chunk_size(HTTP_response *response)
+/*int http_response_get_chunk_size(HTTP_response *response)
 {
 	register struct http_buffer* current_buffer;
 	register unsigned char *current;
@@ -730,93 +631,94 @@ int http_response_get_chunk_size(HTTP_response *response)
 		current = response->chunk_start;
 
 		num = (size_t)(current - current_buffer->buf);
-while(1){
-		while((prev == NULL || *current != '\n' || *prev != '\r') && num < current_buffer->buf_sz)
+		while(1)
 		{
-			prev = current++;
-			++num;
-			++index;
-		}
-		if((*current == '\n' && *prev == '\r'))
-		{
-			// Нашли конец строки chunk size.
-			--index;
-
-			if(response->chunk_size > 0)
-				response->old_chunk_sum += response->chunk_size/* + index*/;
-
-			if(http_response_get_chunk_size_load(response, index))
-				return 2; // Недопустимый символ в chunk size.
-
-			// Случай chunk size = 0.
-			if(response->chunk_size == 4)
+			while((prev == NULL || *current != '\n' || *prev != '\r') && num < current_buffer->buf_sz)
 			{
-//				response->mode = FREE;
-//				response->rest = 0;
-				response->chunk_size = 0;
-				return 0;
+				prev = current++;
+				++num;
+				++index;
 			}
-
-			if(response->read - response->old_chunk_sum <= response->chunk_size)
+			if((*current == '\n' && *prev == '\r'))
 			{
-				if(response->first_chunk)
+				// Нашли конец строки chunk size.
+				--index;
+
+				if(response->chunk_size > 0)
+					response->old_chunk_sum += response->chunk_size;
+
+				if(http_response_get_chunk_size_load(response, index))
+					return 2; // Недопустимый символ в chunk size.
+
+				// Случай chunk size = 0.
+				if(response->chunk_size == 4)
 				{
-					// 2- CRLF, разделяющий header и тело;
-					// 1 - Первый символ следующего chunk size, должен быть загружен.
-					// CRLF (два) перед и после chunk data учтены в chunk_size.
-					response->ch_num = http_response_get_header_size(response)+2 + response->chunk_size + 1 + index;
-					response->first_chunk = 0;
+//					response->mode = FREE;
+//					response->rest = 0;
+					response->chunk_size = 0;
+					return 0;
 				}
-				else
-					response->ch_num += response->chunk_size + index;
 
-				response->chunk_size += index;
-			}
-			else
-			{
-				// Этот chunk уже полностью загружен. Переходим к следующему.
-				if(index + response->chunk_size < response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf))
-					response->chunk_start += index + response->chunk_size;
-				else
+				if(response->read - response->old_chunk_sum <= response->chunk_size)
 				{
-					response->chunk_size -= response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
-					response->old_chunk_sum += response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
-					response->chunk_buffer = response->chunk_buffer->next;
-
-					while(index + response->chunk_size >= response->chunk_buffer->buf_sz)
+					if(response->first_chunk)
 					{
-						response->chunk_size -= response->chunk_buffer->buf_sz;
-						response->old_chunk_sum += response->chunk_buffer->buf_sz;
-						response->chunk_buffer = response->chunk_buffer->next;
+						// 2- CRLF, разделяющий header и тело;
+						// 1 - Первый символ следующего chunk size, должен быть загружен.
+						// CRLF (два) перед и после chunk data учтены в chunk_size.
+						response->ch_num = http_response_get_header_size(response)+2 + response->chunk_size + 1 + index;
+						response->first_chunk = 0;
 					}
-					response->chunk_start = response->chunk_buffer->buf + index + response->chunk_size;
+					else
+						response->ch_num += response->chunk_size + index;
+
+					response->chunk_size += index;
+				}
+				else
+				{
+					// Этот chunk уже полностью загружен. Переходим к следующему.
+					if(index + response->chunk_size < response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf))
+						response->chunk_start += index + response->chunk_size;
+					else
+					{
+						response->chunk_size -= response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
+						response->old_chunk_sum += response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
+						response->chunk_buffer = response->chunk_buffer->next;
+
+						while(index + response->chunk_size >= response->chunk_buffer->buf_sz)
+						{
+							response->chunk_size -= response->chunk_buffer->buf_sz;
+							response->old_chunk_sum += response->chunk_buffer->buf_sz;
+							response->chunk_buffer = response->chunk_buffer->next;
+						}
+						response->chunk_start = response->chunk_buffer->buf + index + response->chunk_size;
+					}
+
+
+					return http_response_get_chunk_size(response);
 				}
 
-
-				return http_response_get_chunk_size(response);
+				response->do_chunk_skip = 1;
+				return 0; // ВСЁ!
 			}
-
-			response->do_chunk_skip = 1;
-			return 0; // ВСЁ!
-		}
-		if(num == current_buffer->buf_sz)
-		{ //Переключаемся на следующий буфер.
-			num = 0;
-			prev = current-1;
-			current_buffer = current_buffer->next;
-			if(current_buffer != NULL)
-				current = current_buffer->buf;
-			else
-			{
-				response->do_chunk_skip = 0;
-				return 1; // А следующего-то и нет!!! Дозагружаемся.
+			if(num == current_buffer->buf_sz)
+			{ //Переключаемся на следующий буфер.
+				num = 0;
+				prev = current-1;
+				current_buffer = current_buffer->next;
+				if(current_buffer != NULL)
+					current = current_buffer->buf;
+				else
+				{
+					response->do_chunk_skip = 0;
+					return 1; // А следующего-то и нет!!! Дозагружаемся.
+				}
 			}
 		}
-	}
 }
 	else
 		return 1; // Дозагружаемся.
-}
+}*/
 
 int http_response_set_rest(HTTP_response *response)
 {
@@ -915,6 +817,8 @@ int http_response_add_mem_block(HTTP_response *response)
 
 	new_buffer->buf_sz = response->cur_buffer->buf_sz;
 	new_buffer->next = NULL;
+	new_buffer->ch_d = NULL;
+	new_buffer->save_ready = 0;
 
 	response->cur_buffer->next = new_buffer;
 	response->cur_buffer = new_buffer;
@@ -1003,4 +907,3 @@ ssize_t base64_decode(unsigned char *dst, size_t dst_sz, const unsigned char *sr
 
 	return (ssize_t)index;
 }
-

@@ -12,10 +12,6 @@
 #include<fcntl.h>
 #include<sys/select.h>
 #include<errno.h>
-#include<ctype.h>
-
-#include<openssl/bio.h>
-#include<openssl/ssl.h>
 
 #include<string.h>
 #include<assert.h>
@@ -34,7 +30,7 @@ typedef struct __HTTP_request HTTP_request;
 	char *start;
 	size_t sz;
 };*/
-typedef char http_string_t[4096];
+typedef char http_string_t[128];
 
 struct http_buffer{
 	unsigned char *buf;
@@ -53,20 +49,19 @@ struct __HTTP_response{
 	unsigned char *header_end;
 	struct http_buffer *status_line_buffer;
 	unsigned char *status_line_end;
+//	struct http_string headers[128];
 	http_string_t headers[128];
 	int headers_num;
 
 	enum LOAD_MODE mode;
+	ssize_t rest;
 	ssize_t read;
 
+//	int is_chunk;
 	ssize_t chunk_size;
 	size_t old_chunk_sum;
 	struct http_buffer *chunk_buffer;
 	unsigned char *chunk_start;
-	int do_chunk_skip;
-	int first_chunk;
-
-	size_t ch_num;
 };
 typedef struct __HTTP_response HTTP_response;
 
@@ -86,15 +81,14 @@ int http_response_parse_header(HTTP_response*);
 size_t http_response_get_header_size(const HTTP_response*);
 int http_response_get_chunk_size(HTTP_response*);
 int http_response_set_rest(HTTP_response*);
-void http_response_chunk_shift(HTTP_response*);
 
 int base64_encode(unsigned char*, size_t, const unsigned char*, size_t);
 ssize_t base64_decode(unsigned char*, size_t, const unsigned char*);
 
 int main(int argc, char **argv)
 {
-	char host_name[1024] = "www.skydns.ru";
-	char path[1024] = {'/','\0'};
+	char host_name[1024];
+	char path[1024];
 	struct in_addr addresses[16];
 	char ipv4_addr[16] = {'\0'};
 	ssize_t num, i;
@@ -110,35 +104,34 @@ int main(int argc, char **argv)
 	fd_set rset, wset;
 	ssize_t readv_res;
 	struct http_buffer *current_buffer;
-	int auth_need = 0;
+	int auth_need = 1;
 	char auth_string[1024] = "\0";
 	char cred_string[1024] = "\0";
 	char username[] = "skydns";
 	char password[] = "dns1356";
 
-	char request_str[200000] = {'\0'};
+	char request_str[65536] = {'\0'};
 	char *request_str_p;
 
-	BIO *connection;
-	SSL *ssl;
-	SSL_CTX *ctx;
+//base64_encode(request_str,65536,"skydns:dns1356",strlen("skydns:dns1356"));
+/*ssize_t index;
+index = base64_decode(request_str,65536,"Zm9vYmE=");
+request_str[index] = '\0';
+puts(request_str);
+return 0;*/
 
-	SSL_library_init();
-	ctx = SSL_CTX_new(TLS_client_method());
-int end_flag = 0;
 	if(argc < 2)
 	{
 		printf("Usage: %s <url>\n", argv[0]);
 		return 1;
 	}
 
-//	url_get_host(host_name, 1024, argv[1]);
+	url_get_host(host_name, 1024, argv[1]);
 
-
+/*	memcpy(request_str, request.buf, request.buf_sz - request.cur_sz);
+	puts(request_str);*/
 
 	num = get_ipv4_address(addresses, 16, host_name);
-	inet_ntop(AF_INET, addresses, ipv4_addr, sizeof(ipv4_addr));
-
 
 	if(!num)
 	{
@@ -146,7 +139,7 @@ int end_flag = 0;
 		return 2;
 	}
 
-/*	server_addr.sin_family = AF_INET;
+	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr = addresses[0];
 	server_addr.sin_port = htons(80);
 
@@ -154,60 +147,23 @@ int end_flag = 0;
 	{
 		printf("Unable to create socket\n");
 		return 2;
-	}*/
-
-	connection = BIO_new_connect(ipv4_addr);
-	if(!connection)
-	{
-		printf("Can not create BIO connection\n");
-		exit(1);
 	}
-	printf("BIO connection object was created\n");
 
-	BIO_set_conn_port(connection, "443");
-	printf("BIO connection object port was set\n");
-
-//	sock = BIO_get_fd(connection, NULL);
-
-/*	fcntl_flags = fcntl(sock, F_GETFL, 0);
-	fcntl(sock, F_SETFL, fcntl_flags | O_NONBLOCK);*/
-
-	BIO_do_connect(connection);
-
-	SSL_CTX_set_default_verify_paths(ctx);
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-	if((ssl = SSL_new(ctx)) == NULL)
-	{
-		printf("Can not create SSL connection object\n");
-		exit(1);
-	}
-	printf("SSL connection object was created\n");
-
-	SSL_set_bio(ssl, connection, connection);
-	if((SSL_connect(ssl)) < 1)
-	{
-		printf("Can not pass SSL handshake\n");
-		exit(1);
-	}
-	printf("SSL handshake was successfully passed\n");
-
-
-	sock = BIO_get_fd(connection, NULL);
 	fcntl_flags = fcntl(sock, F_GETFL, 0);
 	fcntl(sock, F_SETFL, fcntl_flags | O_NONBLOCK);
 
-/*	if((connect_res = connect(sock, (const struct sockaddr*)&server_addr, sizeof(struct sockaddr_in)))
+	if((connect_res = connect(sock, (const struct sockaddr*)&server_addr, sizeof(struct sockaddr_in)))
 			&& errno != EINPROGRESS)
 	{
 		printf("Unable to connect to the server\n");
 		return 2;
-	}*/
+	}
 
 
 	/* //////////////// Подготовка запроса ///////////////////////////////// */
 	http_request_alloc(&request, 8191);
 
-//	url_get_path(path, 1024, argv[1]);
+	url_get_path(path, 1024, argv[1]);
 
 	http_request_set_method(&request, "GET", "1.1", path);
 	http_request_add_header(&request, "Host", host_name);
@@ -245,17 +201,16 @@ int end_flag = 0;
 	/* //////////////////////////////////// */
 
 	/* ///////////// Отправка запроса /////////////////// */
-/*	out_blocks[0].iov_base = request.buf;
+	out_blocks[0].iov_base = request.buf;
 	out_blocks[0].iov_len = request.buf_sz - request.cur_sz;
 
-	writev(sock, out_blocks, 1);*/
-	SSL_write(ssl, request.buf, request.buf_sz - request.cur_sz);
+	writev(sock, out_blocks, 1);
 
 	http_request_free(&request);
 	/* //////////////////////////////////////////////// */
 
 
-	http_response_alloc(&response,8191);
+	http_response_alloc(&response,10);
 	FD_ZERO(&rset);
 	FD_SET(sock, &rset);
 	pselect(sock + 1, &rset, NULL, NULL, NULL, NULL);
@@ -263,73 +218,91 @@ int end_flag = 0;
 	{
 		while(1)
 		{
-/*			in_blocks[0].iov_base = response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz);
+			in_blocks[0].iov_base = response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz);
 			in_blocks[0].iov_len = response.cur_buffer_sz;
-			*/
 
 			FD_ZERO(&rset);
 			FD_SET(sock, &rset);
-
-			if(!SSL_pending(ssl))
-				pselect(sock + 1, &rset, NULL, NULL, NULL, NULL);
-//			readv_res = readv(sock, in_blocks, 1);
-			readv_res = SSL_read(ssl, response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz), response.cur_buffer_sz);
-			while(readv_res < 0)
-			{
-				int ssl_error;
-				ssl_error = SSL_get_error(ssl,readv_res);
-				if(ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE)
-					readv_res = SSL_read(ssl, response.cur_buffer->buf + (response.cur_buffer->buf_sz - response.cur_buffer_sz), response.cur_buffer_sz);
-				else
-				{
-					// ERROR!!!
-					int a = 0;
-				}
-			}
+			pselect(sock + 1, &rset, NULL, NULL, NULL, NULL);
+			readv_res = readv(sock, in_blocks, 1);
 
 
 			response.cur_buffer_sz -= readv_res;
 			response.read += readv_res;
+			if(response.rest > 0 && response.rest >= readv_res)
+				response.rest -= readv_res;
+			else if(response.rest > 0)
+				response.rest -= readv_res;
+			else
+				;
+
 
 			if(!response.headers_num)
-				if(http_response_find_header_end(&response) < 0)
-				{
-					printf("Error of response header end\n");
-					exit(-18);
-				}
+				http_response_find_header_end(&response);
 
-			if(response.mode == CHUNK && response.read >= response.ch_num)
+			if(response.mode == CHUNK && response.rest < 0)
 			{
+/*current_buffer = response.buffer;
+request_str_p = request_str;
+while(current_buffer != NULL)
+{
+	memcpy(request_str_p, current_buffer->buf, current_buffer->buf_sz);
+	request_str_p += current_buffer->buf_sz;
+	current_buffer = current_buffer->next;
+	}
+puts(request_str);
+exit(15);*/
+				if(response.chunk_size > 0)
+				{
+					if(response.chunk_size < (size_t)(response.chunk_buffer->buf_sz -(response.chunk_start - response.chunk_buffer->buf)))
+						response.chunk_start += response.chunk_size;
+					else
+					{
+						response.chunk_size -= (size_t)(response.chunk_buffer->buf_sz -(response.chunk_start - response.chunk_buffer->buf));
+						response.chunk_buffer = response.chunk_buffer->next;
 
-
-				if(response.do_chunk_skip)
-					http_response_chunk_shift(&response);
-
+						while(response.chunk_size >= response.chunk_buffer->buf_sz)
+						{
+							response.chunk_size -= response.chunk_buffer->buf_sz;
+							response.chunk_buffer = response.chunk_buffer->next;
+						}
+						response.chunk_start = response.chunk_buffer->buf + response.chunk_size;
+					}
+				}
 				if(http_response_get_chunk_size(&response))
 				{
-					if(response.cur_buffer_sz == 0)
-						http_response_add_mem_block(&response);
+					http_response_add_mem_block(&response);
 					continue;
 				}
+				printf("Chunk size: %x\n", response.chunk_size);
+				printf("Rest size: %i\n", response.rest);
+//				exit(27);
 			}
 
 			// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
-			if(response.ch_num > response.read && response.cur_buffer_sz)
-				continue;
-			else if(response.ch_num > response.read)
+			if(response.rest)
 				http_response_add_mem_block(&response);
-			else if(response.mode == LENGTH && response.ch_num == response.read)
-			{
-				printf("AGA!\n");
+	/*		else if(response.rest < 0 && response.is_chunk && response.chunk_buffer == NULL)
+				http_response_add_mem_block(&response); // Загружен header, но места под chunk size не хватило.*/
+			else if(response.mode == LENGTH)
 				break;
-			}
-			else if(response.mode == CHUNK && response.ch_num + 4 == response.read)
+//			else if(response.mode == CHUNK && response.rest == 0 && response.chunk_size == 0)
+			else if(response.mode == CHUNK && response.rest == 0 && response.chunk_size == 0)
 				break;
-			else if(response.cur_buffer_sz)
-				continue;
 			else
 				http_response_add_mem_block(&response);
 		}
+
+/*		current_buffer = response.buffer;
+		request_str_p = request_str;
+		while(current_buffer != NULL)
+		{
+			memcpy(request_str_p, current_buffer->buf, current_buffer->buf_sz);
+			request_str_p += current_buffer->buf_sz;
+			current_buffer = current_buffer->next;
+		}
+
+		puts(request_str);*/
 
 		current_buffer = response.buffer;
 		request_str_p = request_str;
@@ -354,7 +327,6 @@ int end_flag = 0;
 
 	http_response_free(&response);
 
-	BIO_free(connection);
 	return 0;
 }
 
@@ -513,7 +485,7 @@ int http_response_alloc(HTTP_response *response, size_t n)
 	response->header_end = NULL;
 	response->status_line_buffer = NULL;
 	response->status_line_end = NULL;
-//	response->rest = -1;
+	response->rest = -1;
 	response->read = 0;
 	response->mode = FREE;
 	response->headers_num = 0;
@@ -522,9 +494,6 @@ int http_response_alloc(HTTP_response *response, size_t n)
 	response->chunk_size = -1;
 	response->old_chunk_sum = 0;
 	response->chunk_start = NULL;
-	response->do_chunk_skip = 0;
-	response->first_chunk = 1;
-	response->ch_num = 0;
 
 	return 0;
 }
@@ -546,6 +515,34 @@ void http_response_free(HTTP_response *response)
 	}
 }
 
+/*int http_response_find_header_end(HTTP_response *response)
+{
+	register unsigned char *current = response->buf;
+	register size_t num = 0;
+
+	while(num < response->buf_sz - response->cur_sz && (*current != '\n' || *(current - 1) != '\r'))
+	{
+		++current;
+		++num;
+	}
+
+	++current;
+	++num;
+	while(num < response->buf_sz - response->cur_sz)
+		if(*(current - 2) == '\r' && *(current - 1) == '\n' &&
+				*current == '\r' && *(current + 1) == '\n')
+		{
+			response->header_end = current;
+			return 0;
+		}
+		else
+		{
+			++num;
+			++current;
+		}
+
+	return 1;
+}*/
 
 int http_response_find_header_end(HTTP_response *response)
 {
@@ -599,9 +596,7 @@ int http_response_find_header_end(HTTP_response *response)
 				response->header_end_buffer = current_buffer;
 				response->header_end = current;
 				response->headers_num = http_response_parse_header(response);
-				if(http_response_set_rest(response))
-					return -1;
-
+				http_response_set_rest(response);
 				return 0;
 			}
 			else
@@ -648,11 +643,10 @@ int http_response_parse_header(HTTP_response *response)
 			i = 0;
 			++num;
 		}
-
-	if(num == current_buffer->buf_sz)
+		if(num == current_buffer->buf_sz)
 		{
 			num = 0;
-			prev = current-1;
+			prev = current - 1;
 			current_buffer = current_buffer->next;
 			if(current_buffer != NULL)
 				current = current_buffer->buf;
@@ -743,74 +737,58 @@ while(1){
 			--index;
 
 			if(response->chunk_size > 0)
-				response->old_chunk_sum += response->chunk_size/* + index*/;
+				response->old_chunk_sum += response->chunk_size + index;
 
 			if(http_response_get_chunk_size_load(response, index))
 				return 2; // Недопустимый символ в chunk size.
+// Обработать случай chunk size = 0.
 
-			// Случай chunk size = 0.
 			if(response->chunk_size == 4)
 			{
 //				response->mode = FREE;
-//				response->rest = 0;
+				response->rest = 0;
 				response->chunk_size = 0;
 				return 0;
 			}
 
 			if(response->read - response->old_chunk_sum <= response->chunk_size)
 			{
-				if(response->first_chunk)
-				{
-					// 2- CRLF, разделяющий header и тело;
-					// 1 - Первый символ следующего chunk size, должен быть загружен.
-					// CRLF (два) перед и после chunk data учтены в chunk_size.
-					response->ch_num = http_response_get_header_size(response)+2 + response->chunk_size + 1 + index;
-					response->first_chunk = 0;
-				}
-				else
-					response->ch_num += response->chunk_size + index;
-
+				response->rest = response->chunk_size - (response->read - response->old_chunk_sum) + 1;
 				response->chunk_size += index;
 			}
 			else
 			{
 				// Этот chunk уже полностью загружен. Переходим к следующему.
-				if(index + response->chunk_size < response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf))
+				if(index + response->chunk_size < response->chunk_buffer->buf_sz)
 					response->chunk_start += index + response->chunk_size;
 				else
 				{
-					response->chunk_size -= response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
-					response->old_chunk_sum += response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
+					response->chunk_size -= (size_t)(response->chunk_start - response->chunk_buffer->buf);
 					response->chunk_buffer = response->chunk_buffer->next;
 
 					while(index + response->chunk_size >= response->chunk_buffer->buf_sz)
 					{
 						response->chunk_size -= response->chunk_buffer->buf_sz;
-						response->old_chunk_sum += response->chunk_buffer->buf_sz;
 						response->chunk_buffer = response->chunk_buffer->next;
 					}
 					response->chunk_start = response->chunk_buffer->buf + index + response->chunk_size;
 				}
 
-
 				return http_response_get_chunk_size(response);
 			}
 
-			response->do_chunk_skip = 1;
+
 			return 0; // ВСЁ!
 		}
 		if(num == current_buffer->buf_sz)
 		{ //Переключаемся на следующий буфер.
 			num = 0;
-			prev = current-1;
+			prev = current;
 			current_buffer = current_buffer->next;
 			if(current_buffer != NULL)
 				current = current_buffer->buf;
 			else
-			{
-				response->do_chunk_skip = 0;
 				return 1; // А следующего-то и нет!!! Дозагружаемся.
-			}
 		}
 	}
 }
@@ -867,38 +845,12 @@ int http_response_set_rest(HTTP_response *response)
 			while(*tmp == ' ')
 				++tmp;
 			cl = strtol(tmp, NULL, 10);
-//			response->rest = cl - (response->read - http_response_get_header_size(response) -2);
-			response->ch_num = http_response_get_header_size(response) +2 + cl;
+			response->rest = cl - (response->read - http_response_get_header_size(response) -2);
 			response->mode = LENGTH;
 			return 0;
 		}
 	}
 	return 1;
-}
-
-void http_response_chunk_shift(HTTP_response* response)
-{
-
-	if(response->chunk_size > 0)
-	{
-		if(response->chunk_size < (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf)))
-			response->chunk_start += response->chunk_size;
-		else
-		{
-			response->chunk_size -= (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf));
-			response->old_chunk_sum += (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf));
-			response->chunk_buffer = response->chunk_buffer->next;
-
-			while(response->chunk_size >= response->chunk_buffer->buf_sz)
-			{
-				response->chunk_size -= response->chunk_buffer->buf_sz;
-				response->old_chunk_sum += response->chunk_buffer->buf_sz;
-				response->chunk_buffer = response->chunk_buffer->next;
-			}
-			response->chunk_start = response->chunk_buffer->buf + response->chunk_size;
-		}
-	}
-
 }
 
 int http_response_add_mem_block(HTTP_response *response)
