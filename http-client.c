@@ -135,7 +135,24 @@ static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const uns
 }
 ///////////////////////////////////////////////////////////
 
+HTTP_response_fd http_response_fd_create(int *fd)
+{
+	HTTP_response_fd result;
 
+	result.fd = fd;
+	pthread_mutex_init(&result.fd_mtx, NULL);
+	pthread_cond_init(&result.fd_cv, NULL);
+
+	return result;
+
+}
+void http_response_fd_destroy(HTTP_response_fd *response_fd)
+{
+	pthread_cond_destroy(&response_fd->fd_cv);
+	pthread_mutex_destroy(&response_fd->fd_mtx);
+}
+
+//////////////////////////////////////////////////////////////
 HTTP_connection http_create_connection(const struct sockaddr *addr, int flags)
 {
 	HTTP_connection result;
@@ -244,11 +261,6 @@ int http_get_response(HTTP_connection conn, HTTP_response *response)
 	struct iovec in_block;
 	int res;
 
-/*	FD_ZERO(&rset);
-	FD_SET(conn->socket_fd, &rset);
-	pselect(conn->socket_fd + 1, &rset, NULL, NULL, NULL, NULL);
-	if(FD_ISSET(conn->socket_fd, &rset))
-	{*/
 	while(1)
 	{
 		if(conn->use_ssl && !SSL_pending(conn->ssl))
@@ -1065,7 +1077,7 @@ int http_response_add_mem_block(HTTP_response *response)
 }
 
 
-void http_response_body_save(HTTP_response *response, int fd)
+/*void http_response_body_save(HTTP_response *response, int fd)
 {
 	struct http_buffer *current_buffer = response->header_end_buffer;
 	struct buffer_chunk_deskriptor *desc;
@@ -1139,7 +1151,302 @@ void http_response_body_save(HTTP_response *response, int fd)
 	default:
 		break;
 	}
+}*/
+
+struct response_memory_buffer_save_arg{
+	HTTP_response *response;
+	HTTP_response_fd *response_fd;
+};
+
+void* http_response_memory_buffer_save(void *arg)
+{
+	struct http_buffer *current_buffer;
+	struct buffer_chunk_deskriptor *desc;
+	const unsigned char *cur;
+	size_t size;
+	size_t need_write;
+	int *fd;
+	HTTP_response *response;
+	int predicate;
+
+	struct response_memory_buffer_save_arg *save_arg = (struct response_memory_buffer_save_arg*)(arg);
+	response = save_arg->response;
+	current_buffer = response->header_end_buffer;
+	fd = save_arg->response_fd->fd;
+
+	pthread_mutex_lock(&save_arg->response_fd->fd_mtx);
+while(1){
+	predicate = response->header_end == NULL ||
+			(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
+														(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
+	while(predicate)
+	{
+		pthread_cond_wait(&save_arg->response_fd->fd_cv, &save_arg->response_fd->fd_mtx);
+printf("Signal get\n");
+		predicate = response->header_end == NULL ||
+					(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
+														(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
+	}
+printf("Predicate OK!\n");
+	current_buffer = response->header_end_buffer->save_ready ? response->header_end_buffer : response->header_end_buffer->next;
+	switch(save_arg->response->mode){
+	case CHUNK:
+			desc = current_buffer->ch_d;
+
+			if(desc == NULL && current_buffer != response->header_end_buffer)
+				write(*fd, current_buffer->buf, current_buffer->buf_sz);
+			else if(desc == NULL)
+				;
+			else
+				do{
+					if(desc->start != NULL)
+						cur = desc->start;
+					else
+						cur = current_buffer->buf;
+
+					if(desc->end != NULL)
+						size = (size_t)(desc->end - cur);
+					else
+						size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
+write(2, cur, size);
+int res;
+					res = write(*fd, cur, size);
+if(res != size)
+{
+	printf("OOPS! res: %i\n", res);
 }
+					if(desc->is_final)
+					{
+						response->header_end_buffer->next = NULL;
+						http_buffer_free(current_buffer);
+						pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
+						return NULL;
+					}
+
+					desc = desc->next;
+
+				}while(desc != NULL);
+
+//			current_buffer = current_buffer->next; ????
+			if(current_buffer == response->header_end_buffer)
+				response->header_end_buffer->save_ready = 0;
+			else
+			{
+				response->header_end_buffer->next = current_buffer->next;
+				current_buffer->next->prev = response->header_end_buffer;
+				http_buffer_free(current_buffer);
+			}
+
+		break;
+
+	case LENGTH:
+		if(current_buffer == response->header_end_buffer)
+		{
+			need_write = response->content_length;
+			current_buffer->save_ready = 0;
+			if((size_t)(response->header_end - response->header_end_buffer->buf) < response->header_end_buffer->buf_sz - 2)
+			{
+				cur = response->header_end + 2;
+				size = (size_t)(response->header_end_buffer->buf + response->header_end_buffer->buf_sz - cur);
+			}
+			else
+				continue;
+		}
+		else
+		{
+			cur = current_buffer->buf;
+			size = need_write > current_buffer->buf_sz ? current_buffer->buf_sz : need_write;
+		}
+
+		write(*fd, cur, size);
+		need_write -= size;
+		if(current_buffer->next != NULL)
+		{
+			response->header_end_buffer->next = current_buffer->next;
+			current_buffer->next->prev = response->header_end_buffer;
+			http_buffer_free(current_buffer);
+		}
+		else
+		{
+			response->header_end_buffer->next = NULL;
+			http_buffer_free(current_buffer);
+			pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
+			return NULL;
+		}
+
+		break;
+
+	default:
+		break;
+	}
+} // while(1)
+}
+
+int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_response_fd *response_fd)
+{
+	fd_set rset;
+	int readv_res;
+	struct iovec in_block;
+	int res;
+	pthread_t writing_thread_id;
+	void *writing_thread__ret;
+
+	struct response_memory_buffer_save_arg arg;
+	arg.response = response;
+	arg.response_fd = response_fd;
+
+	pthread_create(&writing_thread_id, NULL, http_response_memory_buffer_save, &arg);
+
+	while(1)
+	{
+		if((conn->use_ssl && !SSL_pending(conn->ssl)) || !conn->use_ssl)
+		{
+			do{
+				FD_ZERO(&rset);
+				FD_SET(conn->socket_fd, &rset);
+				pselect(conn->socket_fd + 1, &rset, NULL, NULL, NULL, NULL);
+			}while(!FD_ISSET(conn->socket_fd, &rset));
+		}
+
+		if(conn->use_ssl)
+		{
+			readv_res = SSL_read(conn->ssl, response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz), response->cur_buffer_sz);
+			while(readv_res < 0)
+			{
+				int ssl_error;
+				ssl_error = SSL_get_error(conn->ssl,readv_res);
+				if(ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE)
+					readv_res = SSL_read(conn->ssl, response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz), response->cur_buffer_sz);
+				else
+				{
+					pthread_cancel(writing_thread_id);
+					pthread_join(writing_thread_id, &writing_thread__ret);
+					return 1;
+				}
+			}
+		}
+		else
+		{
+			in_block.iov_base = response->cur_buffer->buf + (response->cur_buffer->buf_sz - response->cur_buffer_sz);
+			in_block.iov_len = response->cur_buffer_sz;
+
+			readv_res = readv(conn->socket_fd, &in_block, 1);
+			while(readv_res < 0)
+			{
+				if(errno == EAGAIN || errno == EWOULDBLOCK)
+					readv_res = readv(conn->socket_fd, &in_block, 1);
+				else
+				{
+					pthread_cancel(writing_thread_id);
+					pthread_join(writing_thread_id, &writing_thread__ret);
+					return 1;
+				}
+			}
+		}
+
+
+		response->cur_buffer_sz -= readv_res;
+		response->read += readv_res;
+
+		if(!response->headers_num)
+		{
+			res = http_response_find_header_end(response);
+			if(res < 0)
+			{
+				pthread_cancel(writing_thread_id);
+				pthread_join(writing_thread_id, &writing_thread__ret);
+				return 1;
+			}
+			else if(res == 0)
+			{
+				pthread_mutex_lock(&response_fd->fd_mtx);
+				response->header_end_buffer->save_ready = 1;
+				pthread_mutex_unlock(&response_fd->fd_mtx);
+				http_response_get_code(response);
+			}
+			else
+				;
+		}
+
+		if(response->mode == CHUNK && response->read >= response->ch_num)
+		{
+			if(response->do_chunk_skip)
+				http_response_chunk_shift(response);
+
+			if(http_response_get_chunk_size(response))
+			{
+				if(response->cur_buffer_sz == 0)
+				{
+					pthread_mutex_lock(&response_fd->fd_mtx);
+					http_response_add_mem_block(response);
+					if(response->cur_buffer->prev->prev != NULL && response->cur_buffer->prev->prev != response->header_end_buffer)
+						response->cur_buffer->prev->prev->save_ready = 1;
+					pthread_mutex_unlock(&response_fd->fd_mtx);
+	pthread_cond_signal(&response_fd->fd_cv);
+printf("1\n");
+				}
+				continue;
+			}
+		}
+
+		// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
+		if(response->ch_num > response->read && response->cur_buffer_sz)
+			continue;
+		else if(response->ch_num > response->read)
+		{
+			pthread_mutex_lock(&response_fd->fd_mtx);
+			http_response_add_mem_block(response);
+			if(response->mode == CHUNK && response->cur_buffer->prev->prev != NULL
+					&& response->cur_buffer->prev->prev != response->header_end_buffer)
+				response->cur_buffer->prev->prev->save_ready = 1;
+			else if(response->mode == LENGTH && response->cur_buffer->prev != NULL
+					&& response->cur_buffer->prev != response->header_end_buffer)
+				response->cur_buffer->prev->save_ready = 1;
+			else
+				;
+			pthread_mutex_unlock(&response_fd->fd_mtx);
+	pthread_cond_signal(&response_fd->fd_cv);
+printf("2\n");
+		}
+		else if(response->mode == LENGTH && response->ch_num == response->read)
+			break;
+		else if(response->mode == CHUNK && response->ch_num + 4 == response->read)
+			break;
+		else if(response->cur_buffer_sz)
+			continue;
+		else
+		{
+			pthread_mutex_lock(&response_fd->fd_mtx);
+			http_response_add_mem_block(response);
+			if(response->mode == CHUNK && response->cur_buffer->prev->prev != NULL
+					&& response->cur_buffer->prev->prev != response->header_end_buffer)
+				response->cur_buffer->prev->prev->save_ready = 1;
+			else if(response->mode == LENGTH && response->cur_buffer->prev != NULL
+					&& response->cur_buffer->prev != response->header_end_buffer)
+				response->cur_buffer->prev->save_ready = 1;
+			else
+				;
+			pthread_mutex_unlock(&response_fd->fd_mtx);
+pthread_cond_signal(&response_fd->fd_cv);
+printf("3\n");
+		}
+	}
+
+
+printf("4\n");
+if(response->mode == CHUNK)
+{
+	response->cur_buffer->save_ready = 1;
+	if(response->cur_buffer->prev != NULL)
+		response->cur_buffer->prev->save_ready = 1;
+}
+printf("Response function ended\n");
+pthread_cond_signal(&response_fd->fd_cv);
+	pthread_join(writing_thread_id, &writing_thread__ret);
+printf("1\n");
+	return 0;
+}
+
 
 int base64_encode(unsigned char *dst, size_t dst_sz, const unsigned char *src, size_t src_sz)
 {

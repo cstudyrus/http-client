@@ -6,6 +6,7 @@
 #include<openssl/bio.h>
 #include<openssl/ssl.h>
 #include<arpa/inet.h>
+#include<pthread.h>
 
 #define HTTP_CONNECTION_INVALID NULL
 
@@ -77,6 +78,16 @@ struct __HTTP_response{
 };
 typedef struct __HTTP_response HTTP_response;
 
+struct __HTTP_response_fd{
+	int *fd;
+	pthread_mutex_t fd_mtx;
+	pthread_cond_t fd_cv;
+};
+typedef struct __HTTP_response_fd HTTP_response_fd;
+
+HTTP_response_fd http_response_fd_create(int*);
+void http_response_fd_destroy(HTTP_response_fd*);
+
 HTTP_connection http_create_connection(const struct sockaddr*, int);
 void http_shutdown_connection(HTTP_connection);
 int http_send_request(HTTP_connection, const HTTP_request*);
@@ -101,7 +112,8 @@ int http_response_get_chunk_size(HTTP_response*);
 int http_response_set_rest(HTTP_response*);
 void http_response_chunk_shift(HTTP_response*);
 
-void http_response_body_save(HTTP_response*, int);
+//void http_response_body_save(HTTP_response*, int);
+int http_response_body_save(HTTP_connection, HTTP_response*, HTTP_response_fd*);
 
 int base64_encode(unsigned char*, size_t, const unsigned char*, size_t);
 ssize_t base64_decode(unsigned char*, size_t, const unsigned char*);

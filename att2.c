@@ -8,6 +8,8 @@
 #include<netdb.h>
 #include<string.h>
 
+int fd;
+
 ssize_t get_ipv4_address(struct in_addr*, size_t, const char*);
 
 int main(int argc, char **argv)
@@ -87,8 +89,15 @@ int main(int argc, char **argv)
 
 
 	/* /////// Получение response /////////////////// */
+
+	fd = open("cat6.txt", O_CREAT | O_TRUNC | O_RDWR, S_IRWXU);
+
+	HTTP_response_fd response_fd;
+	response_fd = http_response_fd_create(&fd);
+
 	http_response_alloc(&response, 30);
-	if(http_get_response(conn, &response))
+//	if(http_get_response(conn, &response))
+	if(http_response_body_save(conn, &response, &response_fd))
 	{
 		printf("Response getting error\n");
 		return 1;
@@ -118,15 +127,15 @@ int main(int argc, char **argv)
 	request_str[response.read] = 0;
 	puts(request_str);*/
 
-	int fd;
+/*	int fd;
 
 	fd = open("cat2.txt", O_CREAT | O_TRUNC | O_RDWR);
 //	fd = open("att.txt", O_CREAT | O_TRUNC | O_RDWR);
 //	fd = open("grandbase.db", O_CREAT | O_TRUNC | O_RDWR);
 
-	http_response_body_save(&response, fd);
+	http_response_body_save(&response, fd);*/
 
-	http_response_free(&response);
+//	http_response_free(&response);
 
 	return 0;
 }
