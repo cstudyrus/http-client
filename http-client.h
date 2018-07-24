@@ -41,7 +41,7 @@ struct http_buffer{
 	unsigned char *buf;
 	size_t buf_sz;
 
-	struct http_buffer *next;
+	struct http_buffer *next, *prev;
 
 	struct buffer_chunk_deskriptor *ch_d;
 	int save_ready;
@@ -52,9 +52,8 @@ struct __HTTP_response{
 	struct http_buffer *cur_buffer;
 	size_t cur_buffer_sz;
 
-//	char code[4];
 	unsigned short code;
-	http_string_t code_text;
+	char code_text[65];
 	struct http_buffer *header_end_buffer;
 	unsigned char *header_end;
 	struct http_buffer *status_line_buffer;

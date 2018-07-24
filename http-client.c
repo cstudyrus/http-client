@@ -60,6 +60,12 @@ struct buffer_chunk_deskriptor
 	const unsigned char *start;
 	const unsigned char *end;
 
+	// Показывает, является ли данная порция для записи последней.
+	// Опредедить её по последней порции последнего chunk не представляется возможным,
+	// так как реальна ситуация, когда в последнем буфере оказываются лишь финальные CRLF.
+	// В этом случае последний буфер, в котором лишь "охвостья", воспринимается как буфер с пустым buffer_chunk_deskriptor,
+	// и потому ошибочно записывается полностью, если нет явного признака последнего фрагмента для записи.
+	int is_final;
 	struct buffer_chunk_deskriptor *next;
 };
 
@@ -88,6 +94,7 @@ static int buffer_chunk_deskriptor_add(struct http_buffer *b, const unsigned cha
 	new_desc->start = n;
 	new_desc->end = NULL;
 	new_desc->next = NULL;
+	new_desc->is_final = 0;
 
 	if(tmp == NULL)
 	{
@@ -101,7 +108,7 @@ static int buffer_chunk_deskriptor_add(struct http_buffer *b, const unsigned cha
 	return 0;
 }
 
-static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const unsigned char *n)
+static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const unsigned char *n, int is_final)
 {
 	struct buffer_chunk_deskriptor *new_desc;
 	struct buffer_chunk_deskriptor *tmp = b->ch_d;
@@ -115,6 +122,7 @@ static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const uns
 		new_desc->start = NULL;
 		new_desc->end = n;
 		new_desc->next = NULL;
+		new_desc->is_final = is_final;
 
 		b->ch_d = new_desc;
 		return 0;
@@ -122,6 +130,7 @@ static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const uns
 	while(tmp->next != NULL)
 		tmp = tmp->next;
 	tmp->end = n;
+	tmp->is_final = is_final;
 	return 0;
 }
 ///////////////////////////////////////////////////////////
@@ -447,6 +456,7 @@ int http_response_alloc(HTTP_response *response, size_t n)
 
 	response->buffer->buf_sz = n;
 	response->buffer->next = NULL;
+	response->buffer->prev = NULL;
 	response->buffer->ch_d = NULL;
 	response->buffer->save_ready = 0;
 
@@ -826,9 +836,10 @@ else
 //	CRLF chunk_size CRLF начинается в предыдущем memory_buffer!!!
 // Найти его и обработать!!!
 	// Это предыдущий chunk заканчивается в предыдущем буфере.
-	chunk_end_buffer = response->header_end_buffer;
+chunk_end_buffer = current_buffer->prev;
+/*	chunk_end_buffer = response->header_end_buffer;
 	while(chunk_end_buffer->next != current_buffer)
-		chunk_end_buffer = chunk_end_buffer->next;
+		chunk_end_buffer = chunk_end_buffer->next;*/
 	chunk_end = (chunk_end_buffer->buf + chunk_end_buffer->buf_sz) - (size_t)(current - current_buffer->buf);
 
 }
@@ -873,14 +884,14 @@ else
 				if(response->chunk_size == 4)
 				{
 // Записать информацию о последнем chunk.
-buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end);
+buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end, 1);
 					response->chunk_size = 0;
 					return 0;
 				}
 
 // Записать информацию о конце предыдущего chunk и о начале нового.
 if(!response->first_chunk)
-	buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end);
+	buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end, 0);
 buffer_chunk_deskriptor_add(chunk_start_buffer, chunk_start);
 
 				// Сдвигаем соответствующим образом response->ch_num.
@@ -1042,6 +1053,7 @@ int http_response_add_mem_block(HTTP_response *response)
 
 	new_buffer->buf_sz = response->cur_buffer->buf_sz;
 	new_buffer->next = NULL;
+	new_buffer->prev = response->cur_buffer;
 	new_buffer->ch_d = NULL;
 	new_buffer->save_ready = 0;
 
@@ -1084,6 +1096,9 @@ void http_response_body_save(HTTP_response *response, int fd)
 						size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
 
 					write(fd, cur, size);
+
+					if(desc->is_final)
+						return;
 
 					desc = desc->next;
 
