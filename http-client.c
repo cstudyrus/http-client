@@ -317,8 +317,18 @@ int http_get_response(HTTP_connection conn, HTTP_response *response)
 
 		if(response->mode == CHUNK && response->read >= response->ch_num)
 		{
-			if(response->do_chunk_skip)
-				http_response_chunk_shift(response);
+			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
+			{
+//				http_response_chunk_shift(response);
+				size_t b_sz = response->buffer->buf_sz;
+				if(response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
+					response->chunk_start += response->chunk_size;
+				else
+				{
+				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - (b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))) % b_sz;
+				response->chunk_buffer = response->cur_buffer;
+				}
+			}
 
 			if(http_response_get_chunk_size(response))
 			{
@@ -1218,7 +1228,7 @@ if(res != size)
 					if(desc->is_final)
 					{
 						response->header_end_buffer->next = NULL;
-						http_buffer_free(current_buffer);
+//						http_buffer_free(current_buffer);
 						pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
 						return NULL;
 					}
@@ -1234,7 +1244,7 @@ if(res != size)
 			{
 				response->header_end_buffer->next = current_buffer->next;
 				current_buffer->next->prev = response->header_end_buffer;
-				http_buffer_free(current_buffer);
+//				http_buffer_free(current_buffer);
 			}
 
 		break;
