@@ -65,6 +65,8 @@ struct __HTTP_response{
 	enum LOAD_MODE mode;
 	ssize_t read;
 
+	size_t content_length;
+
 	ssize_t chunk_size;
 	size_t old_chunk_sum;
 	struct http_buffer *chunk_buffer;
@@ -99,6 +101,8 @@ size_t http_response_get_header_size(const HTTP_response*);
 int http_response_get_chunk_size(HTTP_response*);
 int http_response_set_rest(HTTP_response*);
 void http_response_chunk_shift(HTTP_response*);
+
+void http_response_body_save(HTTP_response*, int);
 
 int base64_encode(unsigned char*, size_t, const unsigned char*, size_t);
 ssize_t base64_decode(unsigned char*, size_t, const unsigned char*);

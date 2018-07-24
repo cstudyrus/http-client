@@ -59,7 +59,71 @@ struct buffer_chunk_deskriptor
 {
 	const unsigned char *start;
 	const unsigned char *end;
+
+	struct buffer_chunk_deskriptor *next;
 };
+
+static void http_buffer_free(struct http_buffer *b)
+{
+	const struct buffer_chunk_deskriptor *tmp = b->ch_d, *tmp2;
+
+	while(tmp != NULL)
+	{
+		tmp2 = tmp->next;
+		free((void*)tmp);
+		tmp = tmp2;
+	}
+
+	free(b->buf);
+	free(b);
+}
+
+static int buffer_chunk_deskriptor_add(struct http_buffer *b, const unsigned char *n)
+{
+	struct buffer_chunk_deskriptor *tmp = b->ch_d;
+	struct buffer_chunk_deskriptor *new_desc = (struct buffer_chunk_deskriptor*)malloc(sizeof(struct buffer_chunk_deskriptor));
+	if(new_desc == NULL)
+		return 1;
+
+	new_desc->start = n;
+	new_desc->end = NULL;
+	new_desc->next = NULL;
+
+	if(tmp == NULL)
+	{
+		b->ch_d = new_desc;
+		return 0;
+	}
+
+	while(tmp->next != NULL)
+		tmp = tmp->next;
+	tmp->next = new_desc;
+	return 0;
+}
+
+static int buffer_chunk_deskriptor_set_last_end(struct http_buffer *b, const unsigned char *n)
+{
+	struct buffer_chunk_deskriptor *new_desc;
+	struct buffer_chunk_deskriptor *tmp = b->ch_d;
+
+	if(tmp == NULL)
+	{
+		new_desc = (struct buffer_chunk_deskriptor*)malloc(sizeof(struct buffer_chunk_deskriptor));
+		if(new_desc == NULL)
+			return 1;
+
+		new_desc->start = NULL;
+		new_desc->end = n;
+		new_desc->next = NULL;
+
+		b->ch_d = new_desc;
+		return 0;
+	}
+	while(tmp->next != NULL)
+		tmp = tmp->next;
+	tmp->end = n;
+	return 0;
+}
 ///////////////////////////////////////////////////////////
 
 
@@ -383,6 +447,8 @@ int http_response_alloc(HTTP_response *response, size_t n)
 
 	response->buffer->buf_sz = n;
 	response->buffer->next = NULL;
+	response->buffer->ch_d = NULL;
+	response->buffer->save_ready = 0;
 
 //	response->cur_sz = response->buf_sz = n;
 	response->cur_buffer_sz = n;
@@ -392,6 +458,7 @@ int http_response_alloc(HTTP_response *response, size_t n)
 	response->status_line_end = NULL;
 //	response->rest = -1;
 	response->read = 0;
+	response->content_length = 0;
 	response->mode = FREE;
 	response->headers_num = 0;
 
@@ -411,7 +478,7 @@ void http_response_free(HTTP_response *response)
 /*	response->cur_sz = response->buf_sz = 0;
 	response->header_end = NULL;
 	free(response->buf);*/
-	struct http_buffer *tmp;
+/*	struct http_buffer *tmp;
 
 	while(response->buffer != NULL)
 	{
@@ -420,6 +487,14 @@ void http_response_free(HTTP_response *response)
 		response->buffer = response->buffer->next;
 		free(tmp);
 
+	}*/
+
+	struct http_buffer *tmp = response->buffer, *tmp2;
+	while(tmp != NULL)
+	{
+		tmp2 = tmp->next;
+		http_buffer_free(tmp);
+		tmp = tmp2;
 	}
 }
 
@@ -720,6 +795,155 @@ static int http_response_get_chunk_size_load(HTTP_response *response, size_t n)
 		return 1; // Дозагружаемся.
 }*/
 
+int http_response_get_chunk_size(HTTP_response *response)
+{
+	register struct http_buffer* current_buffer;
+	register unsigned char *current;
+	register unsigned char *prev = NULL;
+	size_t num, index = 0;
+	size_t rest_chunk_size;
+
+struct http_buffer *chunk_start_buffer; // Начало CRLF chunk_size CRLF.
+unsigned char *chunk_start;
+struct http_buffer *chunk_end_buffer; // Начало следующего chunk, после текущего CRLF chunk_size CRLF.
+unsigned char *chunk_end;
+
+
+	if(response->chunk_buffer != NULL)
+	{
+		current_buffer = response->chunk_buffer;
+		current = response->chunk_start;
+
+//////// Вычисляем конец предыдущего chunk.
+if((size_t)(current - current_buffer->buf) >= 2)
+{
+	// Это предыдущий chunk заканчивается в текущем буфере.
+	chunk_end_buffer = current_buffer;
+	chunk_end = current - 2;
+}
+else
+{
+//	CRLF chunk_size CRLF начинается в предыдущем memory_buffer!!!
+// Найти его и обработать!!!
+	// Это предыдущий chunk заканчивается в предыдущем буфере.
+	chunk_end_buffer = response->header_end_buffer;
+	while(chunk_end_buffer->next != current_buffer)
+		chunk_end_buffer = chunk_end_buffer->next;
+	chunk_end = (chunk_end_buffer->buf + chunk_end_buffer->buf_sz) - (size_t)(current - current_buffer->buf);
+
+}
+/////////
+
+		num = (size_t)(current - current_buffer->buf);
+		while(1)
+		{
+			while((prev == NULL || *current != '\n' || *prev != '\r') && num < current_buffer->buf_sz)
+			{
+				prev = current++;
+				++num;
+				++index;
+			}
+			if((*current == '\n' && *prev == '\r'))
+			{
+				// Нашли конец строки chunk size.
+				--index;
+///////////////////
+if((size_t)(current - current_buffer->buf) < current_buffer->buf_sz - 1)
+{
+	chunk_start_buffer = current_buffer;
+	chunk_start = current + 1;
+}
+else
+	// Особая ситуация!!!
+	// chunk-size CRLF  падают на конец текущего memory_buffer!!!
+	// Новый chunk начнётся в следующем buffer!!!
+	// ОБРАБОТАТЬ!!!!!!!!!!!!!!!!!!!!
+	;
+// В новом буфере вообще ничего писать не нужно, для него chunk как бы продолжается из следующего.
+///////////////////////
+
+
+				if(response->chunk_size > 0)
+					response->old_chunk_sum += response->chunk_size;
+
+				if(http_response_get_chunk_size_load(response, index))
+					return 2; // Недопустимый символ в chunk size.
+
+				// Случай chunk size = 0.
+				if(response->chunk_size == 4)
+				{
+// Записать информацию о последнем chunk.
+buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end);
+					response->chunk_size = 0;
+					return 0;
+				}
+
+// Записать информацию о конце предыдущего chunk и о начале нового.
+if(!response->first_chunk)
+	buffer_chunk_deskriptor_set_last_end(chunk_end_buffer, chunk_end);
+buffer_chunk_deskriptor_add(chunk_start_buffer, chunk_start);
+
+				// Сдвигаем соответствующим образом response->ch_num.
+				if(response->first_chunk)
+				{
+					// 2- CRLF, разделяющий header и тело;
+					// 1 - Первый символ следующего chunk size, должен быть загружен.
+					// CRLF (два) перед и после chunk data учтены в chunk_size.
+					response->ch_num = http_response_get_header_size(response)+2 + response->chunk_size + 1 + index;
+					response->first_chunk = 0;
+				}
+				else
+					response->ch_num += response->chunk_size + index;
+
+
+				if(response->read - response->old_chunk_sum <= response->chunk_size)
+					response->chunk_size += index;
+				else
+				{
+					// Этот chunk уже полностью загружен. Переходим к следующему.
+					if(index + response->chunk_size < response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf))
+						response->chunk_start += index + response->chunk_size;
+					else
+					{
+						response->chunk_size -= response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
+						response->old_chunk_sum += response->chunk_buffer->buf_sz - (size_t)(response->chunk_start - response->chunk_buffer->buf);
+						response->chunk_buffer = response->chunk_buffer->next;
+
+						while(index + response->chunk_size >= response->chunk_buffer->buf_sz)
+						{
+							response->chunk_size -= response->chunk_buffer->buf_sz;
+							response->old_chunk_sum += response->chunk_buffer->buf_sz;
+							response->chunk_buffer = response->chunk_buffer->next;
+						}
+						response->chunk_start = response->chunk_buffer->buf + index + response->chunk_size;
+					}
+
+
+					return http_response_get_chunk_size(response);
+				}
+
+				response->do_chunk_skip = 1;
+				return 0; // ВСЁ!
+			}
+			if(num == current_buffer->buf_sz)
+			{ //Переключаемся на следующий буфер.
+				num = 0;
+				prev = current-1;
+				current_buffer = current_buffer->next;
+				if(current_buffer != NULL)
+					current = current_buffer->buf;
+				else
+				{
+					response->do_chunk_skip = 0;
+					return 1; // А следующего-то и нет!!! Дозагружаемся.
+				}
+			}
+		}
+}
+	else
+		return 1; // Дозагружаемся.
+}
+
 int http_response_set_rest(HTTP_response *response)
 {
 	size_t i;
@@ -727,7 +951,7 @@ int http_response_set_rest(HTTP_response *response)
 	const char transfer_encoding[] = "Transfer-Encoding:";
 	const char chunk[] = "chunked";
 	register char *tmp;
-	int cl;
+//	int cl;
 
 	for(i=0; i<response->headers_num; ++i)
 	{
@@ -768,10 +992,11 @@ int http_response_set_rest(HTTP_response *response)
 			tmp = response->headers[i] + sizeof(content_length) - 1;
 			while(*tmp == ' ')
 				++tmp;
-			cl = strtol(tmp, NULL, 10);
+			response->content_length = strtol(tmp, NULL, 10);
 //			response->rest = cl - (response->read - http_response_get_header_size(response) -2);
-			response->ch_num = http_response_get_header_size(response) +2 + cl;
+			response->ch_num = http_response_get_header_size(response) +2 + response->content_length;
 			response->mode = LENGTH;
+
 			return 0;
 		}
 	}
@@ -825,6 +1050,80 @@ int http_response_add_mem_block(HTTP_response *response)
 	response->cur_buffer_sz = new_buffer->buf_sz;
 
 	return 0;
+}
+
+
+void http_response_body_save(HTTP_response *response, int fd)
+{
+	struct http_buffer *current_buffer = response->header_end_buffer;
+	struct buffer_chunk_deskriptor *desc;
+	const unsigned char *cur;
+	size_t size;
+	size_t need_write;
+
+	switch(response->mode){
+	case CHUNK:
+		while(current_buffer != NULL)
+		{
+			desc = current_buffer->ch_d;
+
+			if(desc == NULL && current_buffer != response->header_end_buffer)
+				write(fd, current_buffer->buf, current_buffer->buf_sz);
+			else if(desc == NULL)
+				;
+			else
+				do{
+					if(desc->start != NULL)
+						cur = desc->start;
+					else
+						cur = current_buffer->buf;
+
+					if(desc->end != NULL)
+						size = (size_t)(desc->end - cur);
+					else
+						size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
+
+					write(fd, cur, size);
+
+					desc = desc->next;
+
+				}while(desc != NULL);
+
+			current_buffer = current_buffer->next;
+		}
+		break;
+
+	case LENGTH:
+		need_write = response->content_length;
+
+		if((size_t)(response->header_end - response->header_end_buffer->buf) < response->header_end_buffer->buf_sz - 2)
+		{
+			cur = response->header_end + 2;
+			size = (size_t)(response->header_end_buffer->buf + response->header_end_buffer->buf_sz - cur);
+		}
+		else
+		{
+			cur = response->header_end_buffer->next->buf + (response->header_end_buffer->buf_sz - (size_t)(response->header_end - response->header_end_buffer->buf));
+			size = (size_t)(response->header_end_buffer->next->buf + response->header_end_buffer->next->buf_sz - cur);
+
+		}
+
+		while(1)
+		{
+			write(fd, cur, size);
+
+			current_buffer = current_buffer->next;
+			if(current_buffer == NULL)
+				return;
+			cur = current_buffer->buf;
+			need_write -= size;
+			size = need_write > current_buffer->buf_sz ? current_buffer->buf_sz : need_write;
+		}
+		break;
+
+	default:
+		break;
+	}
 }
 
 int base64_encode(unsigned char *dst, size_t dst_sz, const unsigned char *src, size_t src_sz)

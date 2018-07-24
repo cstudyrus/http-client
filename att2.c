@@ -2,6 +2,8 @@
 
 #include<arpa/inet.h>
 #include<sys/types.h>
+#include<sys/stat.h>
+#include<fcntl.h>
 #include<sys/socket.h>
 #include<netdb.h>
 #include<string.h>
@@ -10,7 +12,10 @@ ssize_t get_ipv4_address(struct in_addr*, size_t, const char*);
 
 int main(int argc, char **argv)
 {
-	char host_name[1024] = "www.skydns.ru";
+//	char host_name[1024] = "www.google.com";
+//	char host_name[1024] = "localhost";
+//	char host_name[1024] = "url2cat.skydns.ru";
+	char host_name[1024] = "x.api.safedns.com";
 	struct in_addr addresses[16];
 	ssize_t num;
 	struct sockaddr_in server_addr;
@@ -18,6 +23,14 @@ int main(int argc, char **argv)
 	struct http_buffer *current_buffer;
 	char request_str[200000] = {'\0'};
 	char *request_str_p;
+
+	int auth_need = 1;
+	char auth_string[1024] = "\0";
+	char cred_string[1024] = "\0";
+//	char username[] = "test-url2cat-grandbase";
+//	char password[] = "taG6ahTh7l";
+	char username[] = "skydns";
+	char password[] = "dns1356";
 
 	HTTP_request request;
 	HTTP_response response;
@@ -27,10 +40,10 @@ int main(int argc, char **argv)
 
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr = addresses[0];
-	server_addr.sin_port = htons(443);
-	conn = http_create_connection((const struct sockaddr*)&server_addr, HTTP_SSL_USE | HTTP_SSL_VERIFY_SERVER_CERT);
-//	server_addr.sin_port = htons(80);
-//	conn = http_create_connetcion((const struct sockaddr*)&server_addr, 0);
+//	server_addr.sin_port = htons(443);
+//	conn = http_create_connection((const struct sockaddr*)&server_addr, HTTP_SSL_USE | HTTP_SSL_VERIFY_SERVER_CERT);
+	server_addr.sin_port = htons(80);
+	conn = http_create_connection((const struct sockaddr*)&server_addr, 0);
 
 	if(conn == HTTP_CONNECTION_INVALID)
 	{
@@ -43,11 +56,20 @@ int main(int argc, char **argv)
 	/* //////////////// Подготовка запроса ///////////////////////////////// */
 	http_request_alloc(&request, 8191);
 
-//	url_get_path(path, 1024, argv[1]);
-
-	http_request_set_method(&request, "GET", "1.1", "/");
+//	http_request_set_method(&request, "GET", "1.1", "/api/v1/update/fa46ce28");
+	http_request_set_method(&request, "GET", "1.1", "/domain/nytimes.com");
 	http_request_add_header(&request, "Host", host_name);
 	http_request_add_header(&request, "User-Agent", "liburl2cat");
+	if((auth_need))
+	{
+		strcpy(cred_string, username);
+		strcat(cred_string, ":");
+		strcat(cred_string, password);
+		strcpy(auth_string, "Basic ");
+		base64_encode(auth_string + strlen("Basic "),1024,cred_string,strlen(cred_string));
+
+		http_request_add_header(&request, "Authorization", auth_string);
+	}
 
 	http_request_add_header(&request, "Accept", "*/*");
 	http_request_close_header(&request);
@@ -63,7 +85,7 @@ int main(int argc, char **argv)
 
 
 	/* /////// Получение response /////////////////// */
-	http_response_alloc(&response,8191);
+	http_response_alloc(&response, 8191);
 	if(http_get_response(conn, &response))
 	{
 		printf("Response getting error\n");
@@ -92,8 +114,14 @@ int main(int argc, char **argv)
 		current_buffer = current_buffer->next;
 	}
 	request_str[response.read] = 0;
-
 	puts(request_str);
+
+/*	int fd;
+
+	fd = open("att.txt", O_CREAT | O_TRUNC | O_RDWR);
+//	fd = open("grandbase.db", O_CREAT | O_TRUNC | O_RDWR);
+
+	http_response_body_save(&response, fd);*/
 
 	http_response_free(&response);
 
