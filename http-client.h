@@ -110,6 +110,7 @@ int http_response_parse_header(HTTP_response*);
 size_t http_response_get_header_size(const HTTP_response*);
 int http_response_get_chunk_size(HTTP_response*);
 int http_response_set_rest(HTTP_response*);
+const char* http_response_get_location(const HTTP_response*);
 
 //void http_response_body_save(HTTP_response*, int);
 int http_response_body_save(HTTP_connection, HTTP_response*, HTTP_response_fd*);

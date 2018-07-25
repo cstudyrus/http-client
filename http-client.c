@@ -1025,14 +1025,37 @@ int http_response_set_rest(HTTP_response *response)
 			while(*tmp == ' ')
 				++tmp;
 			response->content_length = strtol(tmp, NULL, 10);
-//			response->rest = cl - (response->read - http_response_get_header_size(response) -2);
 			response->ch_num = http_response_get_header_size(response) +2 + response->content_length;
 			response->mode = LENGTH;
 
 			return 0;
 		}
 	}
+
 	return 1;
+}
+
+const char* http_response_get_location(const HTTP_response *response)
+{
+	size_t i;
+	const char location[] = "Location:";
+	const char *result;
+
+	if(response->header_end_buffer == NULL)
+		return NULL;
+
+	for(i=0; i<response->headers_num; ++i)
+	{
+		if(!strncasecmp(response->headers[i], location, sizeof(location) - 1))
+		{
+			result = response->headers[i] + sizeof(location) - 1;
+			while(*result == ' ')
+				++result;
+			return result;
+		}
+	}
+
+	return NULL;
 }
 
 int http_response_add_mem_block(HTTP_response *response)
@@ -1152,11 +1175,16 @@ void* http_response_memory_buffer_save(void *arg)
 	int *fd;
 	HTTP_response *response;
 	int predicate;
+	int res;
+	struct timespec timeout;
 
 	struct response_memory_buffer_save_arg *save_arg = (struct response_memory_buffer_save_arg*)(arg);
 	response = save_arg->response;
 	current_buffer = response->header_end_buffer;
 	fd = save_arg->response_fd->fd;
+
+	timeout.tv_nsec = 100*1000*1000;
+	timeout.tv_sec = 0;
 
 	// Блокируем мьютекс файлового дескриптора (из save_arg->response_fd)
 	// Это значит, что дугие потоки не могут ни изменять взаимные ссылки в буферах цепи,
@@ -1173,7 +1201,9 @@ void* http_response_memory_buffer_save(void *arg)
 		// Это цикл ожидания готовности очередного буфера в цепи.
 		while(predicate)
 		{
-			pthread_cond_wait(&save_arg->response_fd->fd_cv, &save_arg->response_fd->fd_mtx);
+			res = pthread_cond_timedwait(&save_arg->response_fd->fd_cv, &save_arg->response_fd->fd_mtx, &timeout);
+			if(res == ETIMEDOUT)
+				pthread_testcancel();
 			predicate = response->header_end == NULL ||
 						(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
 															(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
@@ -1209,7 +1239,8 @@ void* http_response_memory_buffer_save(void *arg)
 						if(desc->is_final)
 						{
 							response->header_end_buffer->next = NULL;
-							http_buffer_free(current_buffer);
+							if(current_buffer != response->header_end_buffer)
+								http_buffer_free(current_buffer);
 							pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
 							return NULL;
 						}
@@ -1226,7 +1257,8 @@ void* http_response_memory_buffer_save(void *arg)
 					// Исключаем current_buffer из цепи. Его песенка спета.
 					response->header_end_buffer->next = current_buffer->next;
 					current_buffer->next->prev = response->header_end_buffer;
-					http_buffer_free(current_buffer);
+					if(current_buffer != response->header_end_buffer)
+						http_buffer_free(current_buffer);
 				}
 
 			break;
@@ -1367,7 +1399,7 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 
 		if(response->mode == CHUNK && response->read >= response->ch_num)
 		{
-			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
+			if(response->do_chunk_skip && response->chunk_size != 0)
 			{
 				if(response->chunk_size < b_sz && response->chunk_size < chunk_tail)
 					response->chunk_start += response->chunk_size;

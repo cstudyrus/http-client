@@ -17,8 +17,8 @@ int main(int argc, char **argv)
 //	char host_name[1024] = "www.google.com";
 //	char host_name[1024] = "localhost";
 //	char host_name[1024] = "url2cat.skydns.ru";
-	char host_name[1024] = "x.api.safedns.com";
-//	char host_name[1024] = "www.skydns.ru";
+//	char host_name[1024] = "x.api.safedns.com";
+	char host_name[1024] = "www.skydns.ru";
 //	char host_name[1024] = "www.yandex.ru";
 	struct in_addr addresses[16];
 	ssize_t num;
@@ -28,7 +28,7 @@ int main(int argc, char **argv)
 	char request_str[200000] = {'\0'};
 	char *request_str_p;
 
-	int auth_need = 1;
+	int auth_need = 0;
 	char auth_string[1024] = "\0";
 	char cred_string[1024] = "\0";
 //	char username[] = "test-url2cat-grandbase";
@@ -61,8 +61,8 @@ int main(int argc, char **argv)
 	http_request_alloc(&request, 8191);
 
 //	http_request_set_method(&request, "GET", "1.1", "/api/v1/update/fa46ce28");
-	http_request_set_method(&request, "GET", "1.1", "/domain/nytimes.com");
-//	http_request_set_method(&request, "GET", "1.1", "/");
+//	http_request_set_method(&request, "GET", "1.1", "/domain/nytimes.com");
+	http_request_set_method(&request, "GET", "1.1", "/");
 	http_request_add_header(&request, "Host", host_name);
 	http_request_add_header(&request, "User-Agent", "liburl2cat");
 	if((auth_need))
@@ -96,9 +96,9 @@ int main(int argc, char **argv)
 	HTTP_response_fd response_fd;
 	response_fd = http_response_fd_create(&fd);
 
-	http_response_alloc(&response, 30);
-//	if(http_get_response(conn, &response))
-	if(http_response_body_save(conn, &response, &response_fd))
+	http_response_alloc(&response, 200000);
+	if(http_get_response(conn, &response))
+//	if(http_response_body_save(conn, &response, &response_fd))
 	{
 		printf("Response getting error\n");
 		return 1;
@@ -106,10 +106,12 @@ int main(int argc, char **argv)
 	printf("Response was obtained\n");
 	/* //////////////////////////////////////////// */
 
+	if(response.code == 301)
+		printf("New location: %s\n", http_response_get_location(&response));
 
-	http_shutdown_connection(conn);
+/*	http_shutdown_connection(conn);
 
-/*	current_buffer = response.buffer;
+	current_buffer = response.buffer;
 	request_str_p = request_str;
 	ssize_t rest_copy = response.read;
 	while(current_buffer != NULL)
