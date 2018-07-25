@@ -95,9 +95,9 @@ int main(int argc, char **argv)
 	HTTP_response_fd response_fd;
 	response_fd = http_response_fd_create(&fd);
 
-	http_response_alloc(&response, 200000);
-	if(http_get_response(conn, &response))
-//	if(http_response_body_save(conn, &response, &response_fd))
+	http_response_alloc(&response, 8191);
+//	if(http_get_response(conn, &response))
+	if(http_response_body_save(conn, &response, &response_fd))
 	{
 		printf("Response getting error\n");
 		return 1;
@@ -108,7 +108,7 @@ int main(int argc, char **argv)
 
 	http_shutdown_connection(conn);
 
-	current_buffer = response.buffer;
+/*	current_buffer = response.buffer;
 	request_str_p = request_str;
 	ssize_t rest_copy = response.read;
 	while(current_buffer != NULL)
@@ -125,7 +125,7 @@ int main(int argc, char **argv)
 		current_buffer = current_buffer->next;
 	}
 	request_str[response.read] = 0;
-	puts(request_str);
+	puts(request_str);*/
 
 /*	int fd;
 

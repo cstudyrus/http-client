@@ -319,7 +319,6 @@ int http_get_response(HTTP_connection conn, HTTP_response *response)
 		{
 			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
 			{
-//				http_response_chunk_shift(response);
 				size_t b_sz = response->buffer->buf_sz;
 				if(response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
 					response->chunk_start += response->chunk_size;
@@ -1036,31 +1035,6 @@ int http_response_set_rest(HTTP_response *response)
 	return 1;
 }
 
-void http_response_chunk_shift(HTTP_response* response)
-{
-
-	if(response->chunk_size > 0)
-	{
-		if(response->chunk_size < (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf)))
-			response->chunk_start += response->chunk_size;
-		else
-		{
-			response->chunk_size -= (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf));
-			response->old_chunk_sum += (size_t)(response->chunk_buffer->buf_sz -(response->chunk_start - response->chunk_buffer->buf));
-			response->chunk_buffer = response->chunk_buffer->next;
-
-			while(response->chunk_size >= response->chunk_buffer->buf_sz)
-			{
-				response->chunk_size -= response->chunk_buffer->buf_sz;
-				response->old_chunk_sum += response->chunk_buffer->buf_sz;
-				response->chunk_buffer = response->chunk_buffer->next;
-			}
-			response->chunk_start = response->chunk_buffer->buf + response->chunk_size;
-		}
-	}
-
-}
-
 int http_response_add_mem_block(HTTP_response *response)
 {
 	struct http_buffer *new_buffer;
@@ -1380,8 +1354,17 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 
 		if(response->mode == CHUNK && response->read >= response->ch_num)
 		{
-			if(response->do_chunk_skip)
-				http_response_chunk_shift(response);
+			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
+			{
+				size_t b_sz = response->buffer->buf_sz;
+				if(response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
+					response->chunk_start += response->chunk_size;
+				else
+				{
+				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - (b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))) % b_sz;
+				response->chunk_buffer = response->cur_buffer;
+				}
+			}
 
 			if(http_response_get_chunk_size(response))
 			{
