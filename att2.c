@@ -18,7 +18,8 @@ int main(int argc, char **argv)
 //	char host_name[1024] = "localhost";
 //	char host_name[1024] = "url2cat.skydns.ru";
 //	char host_name[1024] = "x.api.safedns.com";
-	char host_name[1024] = "www.skydns.ru";
+//	char host_name[1024] = "www.skydns.ru";
+	char host_name[1024] = "www.yandex.ru";
 	struct in_addr addresses[16];
 	ssize_t num;
 	struct sockaddr_in server_addr;

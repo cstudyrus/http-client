@@ -1192,17 +1192,13 @@ printf("Predicate OK!\n");
 						size = (size_t)(desc->end - cur);
 					else
 						size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
-write(2, cur, size);
-int res;
-					res = write(*fd, cur, size);
-if(res != size)
-{
-	printf("OOPS! res: %i\n", res);
-}
+
+					write(*fd, cur, size);
+
 					if(desc->is_final)
 					{
 						response->header_end_buffer->next = NULL;
-//						http_buffer_free(current_buffer);
+						http_buffer_free(current_buffer);
 						pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
 						return NULL;
 					}
@@ -1218,7 +1214,7 @@ if(res != size)
 			{
 				response->header_end_buffer->next = current_buffer->next;
 				current_buffer->next->prev = response->header_end_buffer;
-//				http_buffer_free(current_buffer);
+				http_buffer_free(current_buffer);
 			}
 
 		break;
@@ -1248,12 +1244,14 @@ if(res != size)
 		{
 			response->header_end_buffer->next = current_buffer->next;
 			current_buffer->next->prev = response->header_end_buffer;
-			http_buffer_free(current_buffer);
+			if(current_buffer != response->header_end_buffer)
+				http_buffer_free(current_buffer);
 		}
 		else
 		{
 			response->header_end_buffer->next = NULL;
-			http_buffer_free(current_buffer);
+			if(current_buffer != response->header_end_buffer)
+				http_buffer_free(current_buffer);
 			pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
 			return NULL;
 		}
@@ -1274,7 +1272,10 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 	int res;
 	pthread_t writing_thread_id;
 	void *writing_thread__ret;
+	size_t chunk_tail = 0;
+	size_t b_sz;
 
+	b_sz = response->buffer->buf_sz;
 	struct response_memory_buffer_save_arg arg;
 	arg.response = response;
 	arg.response_fd = response_fd;
@@ -1356,12 +1357,13 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 		{
 			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
 			{
-				size_t b_sz = response->buffer->buf_sz;
-				if(response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
+//				if(response->chunk_size < b_sz && response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
+				if(response->chunk_size < b_sz && response->chunk_size < chunk_tail)
 					response->chunk_start += response->chunk_size;
 				else
 				{
-				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - (b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))) % b_sz;
+//				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - (b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))) % b_sz;
+				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - chunk_tail) % b_sz;
 				response->chunk_buffer = response->cur_buffer;
 				}
 			}
@@ -1380,6 +1382,8 @@ printf("1\n");
 				}
 				continue;
 			}
+
+chunk_tail =  b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf);
 		}
 
 		// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
@@ -1402,7 +1406,11 @@ printf("1\n");
 printf("2\n");
 		}
 		else if(response->mode == LENGTH && response->ch_num == response->read)
+		{
+			int a = 0;
+			a = 0;
 			break;
+		}
 		else if(response->mode == CHUNK && response->ch_num + 4 == response->read)
 			break;
 		else if(response->cur_buffer_sz)
@@ -1433,6 +1441,12 @@ if(response->mode == CHUNK)
 	if(response->cur_buffer->prev != NULL)
 		response->cur_buffer->prev->save_ready = 1;
 }
+else if(response->mode == LENGTH)
+{
+	response->cur_buffer->save_ready = 1;
+}
+else
+	;
 printf("Response function ended\n");
 pthread_cond_signal(&response_fd->fd_cv);
 	pthread_join(writing_thread_id, &writing_thread__ret);
