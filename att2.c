@@ -17,9 +17,9 @@ int main(int argc, char **argv)
 //	char host_name[1024] = "www.google.com";
 //	char host_name[1024] = "localhost";
 //	char host_name[1024] = "url2cat.skydns.ru";
-//	char host_name[1024] = "x.api.safedns.com";
+	char host_name[1024] = "x.api.safedns.com";
 //	char host_name[1024] = "www.skydns.ru";
-	char host_name[1024] = "www.yandex.ru";
+//	char host_name[1024] = "www.yandex.ru";
 	struct in_addr addresses[16];
 	ssize_t num;
 	struct sockaddr_in server_addr;
@@ -28,7 +28,7 @@ int main(int argc, char **argv)
 	char request_str[200000] = {'\0'};
 	char *request_str_p;
 
-	int auth_need = 0;
+	int auth_need = 1;
 	char auth_string[1024] = "\0";
 	char cred_string[1024] = "\0";
 //	char username[] = "test-url2cat-grandbase";
@@ -44,10 +44,10 @@ int main(int argc, char **argv)
 
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr = addresses[0];
-	server_addr.sin_port = htons(443);
-	conn = http_create_connection((const struct sockaddr*)&server_addr, HTTP_SSL_USE | HTTP_SSL_VERIFY_SERVER_CERT);
-//	server_addr.sin_port = htons(80);
-//	conn = http_create_connection((const struct sockaddr*)&server_addr, 0);
+//	server_addr.sin_port = htons(443);
+//	conn = http_create_connection((const struct sockaddr*)&server_addr, HTTP_SSL_USE | HTTP_SSL_VERIFY_SERVER_CERT);
+	server_addr.sin_port = htons(80);
+	conn = http_create_connection((const struct sockaddr*)&server_addr, 0);
 
 	if(conn == HTTP_CONNECTION_INVALID)
 	{
@@ -61,8 +61,8 @@ int main(int argc, char **argv)
 	http_request_alloc(&request, 8191);
 
 //	http_request_set_method(&request, "GET", "1.1", "/api/v1/update/fa46ce28");
-//	http_request_set_method(&request, "GET", "1.1", "/domain/nytimes.com");
-	http_request_set_method(&request, "GET", "1.1", "/");
+	http_request_set_method(&request, "GET", "1.1", "/domain/nytimes.com");
+//	http_request_set_method(&request, "GET", "1.1", "/");
 	http_request_add_header(&request, "Host", host_name);
 	http_request_add_header(&request, "User-Agent", "liburl2cat");
 	if((auth_need))
@@ -91,12 +91,12 @@ int main(int argc, char **argv)
 
 	/* /////// Получение response /////////////////// */
 
-	fd = open("cat6.txt", O_CREAT | O_TRUNC | O_RDWR, S_IRWXU);
+	fd = open("cat7.txt", O_CREAT | O_TRUNC | O_RDWR, S_IRWXU);
 
 	HTTP_response_fd response_fd;
 	response_fd = http_response_fd_create(&fd);
 
-	http_response_alloc(&response, 8191);
+	http_response_alloc(&response, 30);
 //	if(http_get_response(conn, &response))
 	if(http_response_body_save(conn, &response, &response_fd))
 	{
@@ -136,7 +136,7 @@ int main(int argc, char **argv)
 
 	http_response_body_save(&response, fd);*/
 
-//	http_response_free(&response);
+	http_response_free(&response);
 
 	return 0;
 }

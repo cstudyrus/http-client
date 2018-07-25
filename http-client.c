@@ -1158,110 +1158,122 @@ void* http_response_memory_buffer_save(void *arg)
 	current_buffer = response->header_end_buffer;
 	fd = save_arg->response_fd->fd;
 
+	// Блокируем мьютекс файлового дескриптора (из save_arg->response_fd)
+	// Это значит, что дугие потоки не могут ни изменять взаимные ссылки в буферах цепи,
+	// ни добавлять/уничтожать новые буфера в цепи.
 	pthread_mutex_lock(&save_arg->response_fd->fd_mtx);
-while(1){
-	predicate = response->header_end == NULL ||
-			(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
-														(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
-	while(predicate)
+	while(1)
 	{
-		pthread_cond_wait(&save_arg->response_fd->fd_cv, &save_arg->response_fd->fd_mtx);
-printf("Signal get\n");
+		// Запускаем основной цикл, в котором ждём готовности очередного буфера в цепи.
+
+		// Это предикат, который проверяет условие готовности к обработке очередного буфера в цепи.
 		predicate = response->header_end == NULL ||
-					(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
-														(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
-	}
-printf("Predicate OK!\n");
-	current_buffer = response->header_end_buffer->save_ready ? response->header_end_buffer : response->header_end_buffer->next;
-	switch(save_arg->response->mode){
-	case CHUNK:
-			desc = current_buffer->ch_d;
+				(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
+															(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
+		// Это цикл ожидания готовности очередного буфера в цепи.
+		while(predicate)
+		{
+			pthread_cond_wait(&save_arg->response_fd->fd_cv, &save_arg->response_fd->fd_mtx);
+			predicate = response->header_end == NULL ||
+						(response->header_end_buffer != NULL && ((!response->header_end_buffer->save_ready && response->header_end_buffer->next == NULL) ||
+															(response->header_end_buffer->next != NULL && !response->header_end_buffer->next->save_ready)));
+		}
 
-			if(desc == NULL && current_buffer != response->header_end_buffer)
-				write(*fd, current_buffer->buf, current_buffer->buf_sz);
-			else if(desc == NULL)
-				;
-			else
-				do{
-					if(desc->start != NULL)
-						cur = desc->start;
-					else
-						cur = current_buffer->buf;
+		// Буфер готов, сохраняем его в current_buffer.
+		// Буфер response->header_end_buffer - заголовок цепи, он В ДАННОМ СЛУЧАЕ не должен уничтожаться.
+		current_buffer = response->header_end_buffer->save_ready ? response->header_end_buffer : response->header_end_buffer->next;
 
-					if(desc->end != NULL)
-						size = (size_t)(desc->end - cur);
-					else
-						size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
+		// Обрабатываем готовый буфер.
+		switch(save_arg->response->mode){
+		case CHUNK:
+				desc = current_buffer->ch_d;
 
-					write(*fd, cur, size);
+				if(desc == NULL && current_buffer != response->header_end_buffer)
+					write(*fd, current_buffer->buf, current_buffer->buf_sz);
+				else if(desc == NULL)
+					; // current_buffer == response->header_end_buffer, но в нём нет данных для сохранения.
+				else
+					do{
+						if(desc->start != NULL)
+							cur = desc->start;
+						else
+							cur = current_buffer->buf;
 
-					if(desc->is_final)
+						if(desc->end != NULL)
+							size = (size_t)(desc->end - cur);
+						else
+							size = (size_t)(current_buffer->buf + current_buffer->buf_sz - cur);
+
+						write(*fd, cur, size);
+
+						if(desc->is_final)
+						{
+							response->header_end_buffer->next = NULL;
+							http_buffer_free(current_buffer);
+							pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
+							return NULL;
+						}
+
+						desc = desc->next;
+
+					}while(desc != NULL);
+
+
+				if(current_buffer == response->header_end_buffer)
+					response->header_end_buffer->save_ready = 0; // Это чтобы response->header_end_buffer в любом случае больше не обрабатывать.
+				else
+				{
+					// Исключаем current_buffer из цепи. Его песенка спета.
+					response->header_end_buffer->next = current_buffer->next;
+					current_buffer->next->prev = response->header_end_buffer;
+					http_buffer_free(current_buffer);
+				}
+
+			break;
+
+		case LENGTH:
+				if(current_buffer == response->header_end_buffer)
+				{
+					need_write = response->content_length;
+					current_buffer->save_ready = 0; // Это чтобы response->header_end_buffer в любом случае больше не обрабатывать.
+					if((size_t)(response->header_end - response->header_end_buffer->buf) < response->header_end_buffer->buf_sz - 2)
 					{
-						response->header_end_buffer->next = NULL;
-						http_buffer_free(current_buffer);
-						pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
-						return NULL;
+						cur = response->header_end + 2;
+						size = (size_t)(response->header_end_buffer->buf + response->header_end_buffer->buf_sz - cur);
 					}
+					else
+						continue; // current_buffer == response->header_end_buffer, но в нём нет данных для сохранения.
+				}
+				else
+				{
+					cur = current_buffer->buf;
+					size = need_write > current_buffer->buf_sz ? current_buffer->buf_sz : need_write;
+				}
 
-					desc = desc->next;
+				write(*fd, cur, size);
+				need_write -= size;
+				if(current_buffer->next != NULL)
+				{
+					response->header_end_buffer->next = current_buffer->next;
+					current_buffer->next->prev = response->header_end_buffer;
+					if(current_buffer != response->header_end_buffer)
+						http_buffer_free(current_buffer);
+				}
+				else
+				{
+					response->header_end_buffer->next = NULL;
+					if(current_buffer != response->header_end_buffer)
+						http_buffer_free(current_buffer);
+					pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
+					return NULL;
+				}
 
-				}while(desc != NULL);
+			break;
 
-//			current_buffer = current_buffer->next; ????
-			if(current_buffer == response->header_end_buffer)
-				response->header_end_buffer->save_ready = 0;
-			else
-			{
-				response->header_end_buffer->next = current_buffer->next;
-				current_buffer->next->prev = response->header_end_buffer;
-				http_buffer_free(current_buffer);
-			}
-
-		break;
-
-	case LENGTH:
-		if(current_buffer == response->header_end_buffer)
-		{
-			need_write = response->content_length;
-			current_buffer->save_ready = 0;
-			if((size_t)(response->header_end - response->header_end_buffer->buf) < response->header_end_buffer->buf_sz - 2)
-			{
-				cur = response->header_end + 2;
-				size = (size_t)(response->header_end_buffer->buf + response->header_end_buffer->buf_sz - cur);
-			}
-			else
-				continue;
-		}
-		else
-		{
-			cur = current_buffer->buf;
-			size = need_write > current_buffer->buf_sz ? current_buffer->buf_sz : need_write;
-		}
-
-		write(*fd, cur, size);
-		need_write -= size;
-		if(current_buffer->next != NULL)
-		{
-			response->header_end_buffer->next = current_buffer->next;
-			current_buffer->next->prev = response->header_end_buffer;
-			if(current_buffer != response->header_end_buffer)
-				http_buffer_free(current_buffer);
-		}
-		else
-		{
-			response->header_end_buffer->next = NULL;
-			if(current_buffer != response->header_end_buffer)
-				http_buffer_free(current_buffer);
-			pthread_mutex_unlock(&save_arg->response_fd->fd_mtx);
-			return NULL;
-		}
-
-		break;
-
-	default:
-		break;
-	}
-} // while(1)
+		default:
+			break;
+		} // switch()
+	} // while(1)
 }
 
 int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_response_fd *response_fd)
@@ -1357,14 +1369,12 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 		{
 			if(response->do_chunk_skip && (response->first_chunk || response->chunk_size != 0) )
 			{
-//				if(response->chunk_size < b_sz && response->chunk_size < b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))
 				if(response->chunk_size < b_sz && response->chunk_size < chunk_tail)
 					response->chunk_start += response->chunk_size;
 				else
 				{
-//				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - (b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf))) % b_sz;
-				response->chunk_start = response->cur_buffer->buf + (response->chunk_size - chunk_tail) % b_sz;
-				response->chunk_buffer = response->cur_buffer;
+					response->chunk_start = response->cur_buffer->buf + (response->chunk_size - chunk_tail) % b_sz;
+					response->chunk_buffer = response->cur_buffer;
 				}
 			}
 
@@ -1377,13 +1387,13 @@ int http_response_body_save(HTTP_connection conn, HTTP_response *response, HTTP_
 					if(response->cur_buffer->prev->prev != NULL && response->cur_buffer->prev->prev != response->header_end_buffer)
 						response->cur_buffer->prev->prev->save_ready = 1;
 					pthread_mutex_unlock(&response_fd->fd_mtx);
-	pthread_cond_signal(&response_fd->fd_cv);
-printf("1\n");
+					pthread_cond_signal(&response_fd->fd_cv);
 				}
 				continue;
 			}
 
-chunk_tail =  b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf);
+			// Эта переменная содержит размер текущего буфера, ПОСЛЕ начала нового chunk включительно.
+			chunk_tail =  b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf);
 		}
 
 		// Это ОБЯЗАТЕЛЬНО(!!!) должно быть на последнем месте.
@@ -1392,6 +1402,8 @@ chunk_tail =  b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf)
 		else if(response->ch_num > response->read)
 		{
 			pthread_mutex_lock(&response_fd->fd_mtx);
+
+			// Добавляем новый буфер в цепь.
 			http_response_add_mem_block(response);
 			if(response->mode == CHUNK && response->cur_buffer->prev->prev != NULL
 					&& response->cur_buffer->prev->prev != response->header_end_buffer)
@@ -1401,16 +1413,14 @@ chunk_tail =  b_sz - (size_t)(response->chunk_start-response->chunk_buffer->buf)
 				response->cur_buffer->prev->save_ready = 1;
 			else
 				;
+
 			pthread_mutex_unlock(&response_fd->fd_mtx);
-	pthread_cond_signal(&response_fd->fd_cv);
-printf("2\n");
+
+			// Даём сигнал на обработку готового буфера, если таковой имеется.
+			pthread_cond_signal(&response_fd->fd_cv);
 		}
 		else if(response->mode == LENGTH && response->ch_num == response->read)
-		{
-			int a = 0;
-			a = 0;
 			break;
-		}
 		else if(response->mode == CHUNK && response->ch_num + 4 == response->read)
 			break;
 		else if(response->cur_buffer_sz)
@@ -1418,6 +1428,8 @@ printf("2\n");
 		else
 		{
 			pthread_mutex_lock(&response_fd->fd_mtx);
+
+			// Добавляем новый буфер в цепь.
 			http_response_add_mem_block(response);
 			if(response->mode == CHUNK && response->cur_buffer->prev->prev != NULL
 					&& response->cur_buffer->prev->prev != response->header_end_buffer)
@@ -1427,30 +1439,35 @@ printf("2\n");
 				response->cur_buffer->prev->save_ready = 1;
 			else
 				;
+
 			pthread_mutex_unlock(&response_fd->fd_mtx);
-pthread_cond_signal(&response_fd->fd_cv);
-printf("3\n");
+
+			// Даём сигнал на обработку готового буфера, если таковой имеется.
+			pthread_cond_signal(&response_fd->fd_cv);
 		}
 	}
 
 
-printf("4\n");
-if(response->mode == CHUNK)
-{
-	response->cur_buffer->save_ready = 1;
-	if(response->cur_buffer->prev != NULL)
-		response->cur_buffer->prev->save_ready = 1;
-}
-else if(response->mode == LENGTH)
-{
-	response->cur_buffer->save_ready = 1;
-}
-else
-	;
-printf("Response function ended\n");
-pthread_cond_signal(&response_fd->fd_cv);
+	// Помечаем последний и предпоследний, если надо, буфера, как готовые.
+	if(response->mode == CHUNK)
+	{
+		response->cur_buffer->save_ready = 1;
+		if(response->cur_buffer->prev != NULL && response->cur_buffer->prev != response->header_end_buffer)
+			response->cur_buffer->prev->save_ready = 1;
+	}
+	else if(response->mode == LENGTH)
+	{
+		response->cur_buffer->save_ready = 1;
+	}
+	else
+		;
+
+	// Даём сигнал на обработку последних буферов в цепи.
+	pthread_cond_signal(&response_fd->fd_cv);
+
+	// Ожидаем завершения записывающего потока.
 	pthread_join(writing_thread_id, &writing_thread__ret);
-printf("1\n");
+
 	return 0;
 }
 
